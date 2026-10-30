@@ -1,20 +1,13 @@
-#!/usr/bin/env bash
-# Start the backend (Flask, :5000) and frontend (Vite, :5173) together.
-# First run creates backend/venv and installs dependencies. Ctrl+C stops both.
-set -euo pipefail
-cd "$(dirname "$0")"
+#!/usr/bin/env sh
+# Start Outreach Tool on Linux/macOS: ./start.sh  (options: --no-browser, --port N, --dev, --check)
+cd "$(dirname "$0")" || exit 1
 
-if [ ! -d backend/venv ]; then
-  echo "Creating Python virtualenv..."
-  python3 -m venv backend/venv
-  backend/venv/bin/pip install -q -r backend/requirements.txt
-fi
-if [ ! -d frontend/node_modules ]; then
-  echo "Installing frontend dependencies..."
-  (cd frontend && npm install --silent)
-fi
+for py in python3 python3.14 python3.13 python3.12 python3.11 python; do
+  if command -v "$py" >/dev/null 2>&1 &&
+     "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+    exec "$py" run.py "$@"
+  fi
+done
 
-trap 'kill 0' EXIT
-(cd backend && venv/bin/python app.py) &
-(cd frontend && npm run dev) &
-wait
+echo "Outreach Tool needs Python 3.11 or newer: https://www.python.org/downloads/" >&2
+exit 1

@@ -1,0 +1,123 @@
+name: Release
+
+# Push a version tag (git tag v1.2.3 && git push origin v1.2.3) to build
+# standalone executables for Windows, macOS and Linux and publish them as a
+# GitHub Release, together with the pre-built website used by run.py on
+# machines without Node.js.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: frontend
+      - run: cd frontend/dist && zip -qr ../../frontend-dist.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-frontend
+          path: frontend-dist.zip
+
+  executables:
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: OutreachTool-linux.tar.gz
+          - os: windows-latest
+            asset: OutreachTool-windows.exe
+          - os: macos-latest
+            asset: OutreachTool-macos.zip
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            packaging/requirements-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - run: pip install -r packaging/requirements-build.txt
+      - run: pyinstaller packaging/outreach.spec --distpath packaging/dist --workpath packaging/build --noconfirm
+
+      - name: Smoke test the executable
+        run: |
+          EXE=packaging/dist/OutreachTool
+          if [ "$RUNNER_OS" = "Windows" ]; then EXE=packaging/dist/OutreachTool.exe; fi
+          "$EXE" --no-browser --port 18765 > smoke.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fs http://127.0.0.1:18765/api/health && break
+            sleep 2
+          done
+          curl -fs http://127.0.0.1:18765/api/health | grep -q '"outreach-tool"'
+          curl -fs http://127.0.0.1:18765/campaigns | grep -q 'id="root"'
+          echo "Smoke test passed"
+          if [ "$RUNNER_OS" = "Windows" ]; then taskkill //F //IM OutreachTool.exe || true; else kill %1 || true; fi
+
+      - name: Package
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   tar -C packaging/dist -czf "${{ matrix.asset }}" OutreachTool ;;
+            macOS)   (cd packaging/dist && zip -q "../../${{ matrix.asset }}" OutreachTool) ;;
+            Windows) cp packaging/dist/OutreachTool.exe "${{ matrix.asset }}" ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.os }}
+          path: ${{ matrix.asset }}
+      - if: failure()
+        run: cat smoke.log || true
+
+  publish:
+    needs: [frontend, executables]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: asset-*
+          merge-multiple: true
+          path: assets
+      - run: ls -la assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
+          body: |
+            ## Download and run — nothing to install
+
+            | System | File | How to start |
+            |---|---|---|
+            | Windows | `OutreachTool-windows.exe` | Double-click. If SmartScreen appears: **More info → Run anyway**. |
+            | macOS | `OutreachTool-macos.zip` | Unzip, then **right-click → Open** the first time (the app isn't signed). |
+            | Linux | `OutreachTool-linux.tar.gz` | `tar xzf OutreachTool-linux.tar.gz && ./OutreachTool` |
+
+            Your browser opens the tool automatically. Keep the window that appears open while you use it; close it to stop.
+            Your settings and contacts are stored in your user folder, so they're kept when you download a newer version.
+
+            `frontend-dist.zip` is the pre-built website, used automatically by `run.py` on machines without Node.js.

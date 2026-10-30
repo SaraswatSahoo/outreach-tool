@@ -41,52 +41,48 @@ A powerful, local-first personal email outreach tool that generates unique, huma
 
 ---
 
-## 📋 Prerequisites
-
-- **Python**: 3.11 or higher.
-- **Node.js**: 18.x or higher.
-- **Gmail Account**: Must have [2-Step Verification](https://myaccount.google.com/security) enabled.
-- **Groq API Key**: At least one key from the [Groq Console](https://console.groq.com/keys). (Up to 3 recommended for high-volume tasks).
-
----
-
 ## 🚀 Getting Started
 
-### 1. Clone the Repository
+You need a **Gmail account with [2-Step Verification](https://myaccount.google.com/security)** (for an App Password) and at least one free **Groq API key** from the [Groq Console](https://console.groq.com/keys). Pick one of the two ways to run it:
+
+### Option 1 — Download the app (nothing to install)
+
+Go to the [**Releases page**](https://github.com/SaraswatSahoo/outreach-tool/releases/latest) and download the file for your system:
+
+| System | File | How to start |
+|---|---|---|
+| Windows | `OutreachTool-windows.exe` | Double-click. If SmartScreen appears: **More info → Run anyway**. |
+| macOS | `OutreachTool-macos.zip` | Unzip, then **right-click → Open** the first time (the app isn't code-signed). |
+| Linux | `OutreachTool-linux.tar.gz` | `tar xzf OutreachTool-linux.tar.gz && ./OutreachTool` |
+
+Your browser opens the tool automatically. A small window shows that it's running — keep it open while you use the tool, and close it to stop.
+
+### Option 2 — Clone and double-click (needs Python 3.11+)
+
 ```bash
 git clone https://github.com/SaraswatSahoo/outreach-tool.git
-cd outreach-tool
 ```
 
-### Quick start
+Then start it:
 
-```bash
-./start.sh   # creates the venv, installs dependencies, starts backend + frontend
-```
+| System | How to start |
+|---|---|
+| Windows | Double-click **`Start Outreach Tool.bat`** |
+| macOS | Double-click **`Start Outreach Tool.command`** (or run `./start.sh`) |
+| Linux | Run `./start.sh` (or `python3 run.py`) |
 
-Or set each part up manually:
+The first start sets everything up by itself — a private Python environment (`.venv/`), the Python packages, and the website (built with Node.js if you have it, otherwise downloaded pre-built from the latest release) — then opens your browser. Later starts take a couple of seconds. If Python is missing, the launcher tells you where to get it ([python.org](https://www.python.org/downloads/); on Windows tick **"Add python.exe to PATH"**).
 
-### 2. Backend Setup
-```bash
-cd backend
-python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
+Options: `--no-browser`, `--port 9000` (default `8765`), `--check` (start, verify, stop).
 
-pip install -r requirements.txt
-python app.py
-```
-*The server will start on `http://localhost:5000`.*
+### Where your data lives
 
-### 3. Frontend Setup
-```bash
-cd ../frontend
-npm install
-npm run dev
-```
-*The application will be available at `http://localhost:5173`.*
+| How you run it | Settings, contacts, database, resume |
+|---|---|
+| Downloaded app | Windows `%APPDATA%\OutreachTool` · macOS `~/Library/Application Support/OutreachTool` · Linux `~/.local/share/outreach-tool` |
+| Cloned repo | `backend/` inside the repo (`config.json`, `outreach.db`, `uploads/`) |
+
+These files are never committed (they're in `.gitignore`). Credentials are stored **unencrypted** in `config.json` — keep it private.
 
 ---
 
@@ -139,6 +135,9 @@ graph LR
 ## 🧪 Development
 
 ```bash
+# Hot-reloading dev servers: Vite on http://localhost:5173 + Flask debug on :5000
+python run.py --dev
+
 # Backend: lint, format check, tests (tests use a throwaway database; no network calls)
 cd backend && pip install -r requirements-dev.txt
 ruff check . && ruff format --check . && python -m pytest
@@ -147,13 +146,17 @@ ruff check . && ruff format --check . && python -m pytest
 cd frontend && npm run lint && npm run build
 ```
 
-CI runs both on every push (`.github/workflows/ci.yml`).
+CI runs both on every push, plus the launcher (`run.py --check`) on Windows, macOS and Linux (`.github/workflows/ci.yml`).
+
+**Making a release:** bump `backend/version.py`, then `git tag v1.2.3 && git push origin v1.2.3`. The Release workflow (`.github/workflows/release.yml`) builds the Windows/macOS/Linux executables with PyInstaller (`packaging/outreach.spec`), smoke-tests each one, and publishes them with the pre-built website.
 
 Backend layout: `app.py` (app factory) · `routes/` (one Flask blueprint per area) · `jobs.py` (background generation/sending) · `sending.py` (starting send jobs) · `automation.py` (scheduled sends + follow-up sequences) · `scheduling.py` (send window / daily cap) · `ai_generator.py` (prompts + Groq) · `inbox_monitor.py` + `reply_detector.py` (IMAP bounce/OOO/reply detection).
 
-Background schedule (while the backend runs): inbox check every 10 min, scheduled sends every minute, follow-up sequences every 15 min. Automation only works while `python app.py` is running.
+How it runs: `run.py` (launcher) → `backend/serve.py` → one Waitress server on `127.0.0.1:8765` serving both the API (`/api/*`) and the built React app (`frontend/dist`).
 
-Environment variables: `FLASK_DEBUG` (default `1`), `PORT` (default `5000`), and `OUTREACH_DB_PATH` / `OUTREACH_CONFIG_PATH` / `OUTREACH_UPLOAD_DIR` to relocate data files. They can also go in `backend/.env` — copy `backend/.env.example`.
+Background schedule (while the tool runs): inbox check every 10 min, scheduled sends every minute, follow-up sequences every 15 min. Automation only works while the tool is running.
+
+Environment variables: `PORT`, `FLASK_DEBUG` (dev server only), and `OUTREACH_DB_PATH` / `OUTREACH_CONFIG_PATH` / `OUTREACH_UPLOAD_DIR` to relocate data files. They can also go in a `.env` file in the data folder — see `backend/.env.example`.
 
 Database changes are versioned migrations in `db.py` (`MIGRATIONS`); they run automatically at startup, and older databases are upgraded in place.
 

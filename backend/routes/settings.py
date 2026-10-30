@@ -7,6 +7,7 @@ import scheduling
 from common import configured_groq_keys, json_error
 from config import is_settings_complete, load_config, save_config
 from constants import GROQ_KEY_FIELDS, SEND_DELAY_MAX, SEND_DELAY_MIN
+from version import VERSION
 
 bp = Blueprint("settings", __name__, url_prefix="/api")
 
@@ -138,3 +139,9 @@ def available_models():
         return jsonify({"models": llm.list_text_models(keys[0])})
     except Exception as e:
         return json_error(f"Couldn't fetch models from Groq: {e}", 502)
+
+
+@bp.route("/health", methods=["GET"])
+def health():
+    """Lets the launcher tell 'this tool is already running here' from 'some other app owns the port'."""
+    return jsonify({"app": "outreach-tool", "version": VERSION})

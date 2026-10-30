@@ -1,0 +1,5 @@
+# Keep launcher line endings correct on every OS, whatever git's autocrlf setting
+*.sh       text eol=lf
+*.command  text eol=lf
+run.py     text eol=lf
+*.bat      text eol=crlf

@@ -20,3 +20,8 @@ backend/*.tmp
 backend/venv/
 .pytest_cache/
 backend/.env
+
+# Launcher and packaging
+.venv/
+packaging/build/
+packaging/dist/

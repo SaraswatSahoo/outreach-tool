@@ -7,8 +7,46 @@ isolated instances.
 """
 
 import os
+import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(BASE_DIR)
+
+# True inside a standalone executable built by PyInstaller
+FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def user_data_dir(platform=None, environ=None):
+    """Per-user folder for app data, following each OS's convention."""
+    platform = platform or sys.platform
+    environ = os.environ if environ is None else environ
+    home = os.path.expanduser("~")
+    if platform.startswith("win"):
+        return os.path.join(environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming"), "OutreachTool")
+    if platform == "darwin":
+        return os.path.join(home, "Library", "Application Support", "OutreachTool")
+    return os.path.join(environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share"), "outreach-tool")
+
+
+def default_data_dir(frozen=FROZEN):
+    """
+    Where config, database and uploads live by default.
+    The executable unpacks to a temporary folder on every run, so it must keep
+    data in the user's app-data folder; running from source keeps it in backend/.
+    """
+    return user_data_dir() if frozen else BASE_DIR
+
+
+def frontend_dist_dir():
+    """The built React app (index.html + assets) served by Flask, if present."""
+    if os.environ.get("OUTREACH_FRONTEND_DIST"):
+        return os.environ["OUTREACH_FRONTEND_DIST"]
+    if FROZEN:
+        return os.path.join(getattr(sys, "_MEIPASS", BASE_DIR), "frontend_dist")
+    return os.path.join(REPO_DIR, "frontend", "dist")
+
+
+DATA_DIR = default_data_dir()
 
 
 def load_dotenv(path):
@@ -30,11 +68,11 @@ def load_dotenv(path):
             os.environ.setdefault(key, value)
 
 
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+load_dotenv(os.path.join(DATA_DIR, ".env"))
 
-DB_PATH = os.environ.get("OUTREACH_DB_PATH", os.path.join(BASE_DIR, "outreach.db"))
-CONFIG_PATH = os.environ.get("OUTREACH_CONFIG_PATH", os.path.join(BASE_DIR, "config.json"))
-UPLOAD_FOLDER = os.environ.get("OUTREACH_UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
+DB_PATH = os.environ.get("OUTREACH_DB_PATH", os.path.join(DATA_DIR, "outreach.db"))
+CONFIG_PATH = os.environ.get("OUTREACH_CONFIG_PATH", os.path.join(DATA_DIR, "config.json"))
+UPLOAD_FOLDER = os.environ.get("OUTREACH_UPLOAD_DIR", os.path.join(DATA_DIR, "uploads"))
 RESUME_PATH = os.path.join(UPLOAD_FOLDER, "resume.pdf")
 RESUME_TEXT_PATH = os.path.join(UPLOAD_FOLDER, "resume.txt")
 

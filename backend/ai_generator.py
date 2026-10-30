@@ -502,7 +502,7 @@ def _call_groq(system_prompt, user_prompt, api_key, retries=4, validator=None, f
                         break  # next model — no key can use it
                     elif _is_rate_limit(err_str):
                         _start_cooldown(key, model, err_str)
-                        print(f"Rate limit hit on {model} for key …{key[-4:]}; trying another key/model...")
+                        print(f"Rate limit hit on {model} for key ...{key[-4:]}; trying another key/model...")
                         break  # next key (then next model)
                     elif "503" in err_str or "UNAVAILABLE" in err_str or "OVERLOADED" in err_str:
                         wait = 5 * (2**attempt)  # 5s, 10s, 20s, 40s

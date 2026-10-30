@@ -25,6 +25,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PORT = 8765
 
 
+def safe_console():
+    """
+    Never crash on console output. Windows consoles often use a legacy code page
+    (cp1252/cp437) that can't encode characters like em dashes, and print()
+    would raise UnicodeEncodeError -- even from background job threads.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def probe(host, port, timeout=1.0):
     """'ours' if Outreach Tool answers on host:port, 'other' if something else does, None if free."""
     try:
@@ -57,6 +70,7 @@ def open_when_ready(url, health_url, timeout=60):
 
 
 def main(argv=None):
+    safe_console()
     parser = argparse.ArgumentParser(description="Run Outreach Tool locally")
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", DEFAULT_PORT)))
@@ -67,7 +81,7 @@ def main(argv=None):
     state = probe(host, port)
     if state == "ours":
         url = f"http://{host}:{port}"
-        print(f"Outreach Tool is already running at {url} — opening it.")
+        print(f"Outreach Tool is already running at {url} - opening it.")
         if not args.no_browser:
             webbrowser.open(url)
         return 0
@@ -87,11 +101,11 @@ def main(argv=None):
     has_frontend = os.path.isfile(os.path.join(frontend_dist_dir(), "index.html"))
     start_scheduler()
 
-    line = "─" * 64
+    line = "-" * 64
     print(f"\n{line}\n  Outreach Tool {VERSION} is running at {url}")
     print(f"  Your data: {os.path.dirname(os.path.abspath(CONFIG_PATH))}")
     if not has_frontend:
-        print("  (API only — the website hasn't been built; use run.py to build it)")
+        print("  (API only - the website hasn't been built; use run.py to build it)")
     print(f"  Keep this window open while you use it. Close it (or press Ctrl+C) to stop.\n{line}\n", flush=True)
 
     if not args.no_browser and has_frontend:

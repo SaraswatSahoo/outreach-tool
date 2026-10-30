@@ -56,6 +56,19 @@ FRONTEND_INPUTS = [
 ]
 
 
+def safe_console():
+    """
+    Never crash on console output. Windows consoles often use a legacy code page
+    (cp1252/cp437) that can't encode characters like em dashes, and print()
+    would raise UnicodeEncodeError -- even from background job threads.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def say(message):
     print(f"[outreach] {message}", flush=True)
 
@@ -165,7 +178,7 @@ def download_prebuilt_frontend():
     if not url:
         repo = github_repo()
         api = f"https://api.github.com/repos/{repo}/releases/latest"
-        say(f"Node.js not found — downloading the pre-built website from {repo} releases...")
+        say(f"Node.js not found - downloading the pre-built website from {repo} releases...")
         try:
             with urllib.request.urlopen(
                 urllib.request.Request(api, headers={"Accept": "application/vnd.github+json"}), timeout=30
@@ -178,7 +191,7 @@ def download_prebuilt_frontend():
             fail("The latest release has no pre-built website. Install Node.js from https://nodejs.org/ and try again.")
         url, tag = asset["browser_download_url"], release.get("tag_name", "release")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         zip_path = os.path.join(tmp, "frontend-dist.zip")
         try:
             urllib.request.urlretrieve(url, zip_path)
@@ -267,7 +280,8 @@ def check(py):
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     env = dict(os.environ)
-    with tempfile.TemporaryDirectory() as data:
+    # ignore_cleanup_errors: on Windows the stopped server may hold its SQLite files a moment longer
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as data:
         # Isolated data so a check never touches real settings or contacts
         env.update(
             OUTREACH_DB_PATH=os.path.join(data, "check.db"),
@@ -299,7 +313,7 @@ def dev(py):
         subprocess.run([npm, "install", "--no-audit", "--no-fund"], cwd=FRONTEND, check=True)
     backend = subprocess.Popen([py, "app.py"], cwd=BACKEND, env={**os.environ, "FLASK_DEBUG": "1"})
     frontend = subprocess.Popen([npm, "run", "dev"], cwd=FRONTEND)
-    say("Dev servers starting — open http://localhost:5173 (Ctrl+C stops both)")
+    say("Dev servers starting - open http://localhost:5173 (Ctrl+C stops both)")
     try:
         frontend.wait()
     except KeyboardInterrupt:
@@ -316,6 +330,7 @@ def main():
     parser.add_argument("--dev", action="store_true", help="development mode (Vite + Flask debug)")
     args, passthrough = parser.parse_known_args()
 
+    safe_console()
     os.chdir(ROOT)
     py = ensure_python_env()
     if args.dev:

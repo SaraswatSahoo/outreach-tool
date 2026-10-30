@@ -80,6 +80,9 @@ app = create_app()
 
 
 if __name__ == "__main__":
+    from serve import safe_console
+
+    safe_console()
     # backend/.env is already loaded by constants.py; stop Flask suggesting python-dotenv
     os.environ.setdefault("FLASK_SKIP_DOTENV", "1")
     load_config()  # Ensure config.json exists

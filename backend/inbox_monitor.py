@@ -1,12 +1,16 @@
-import imaplib
 import email
-import json
+import imaplib
 import re
+from datetime import UTC, datetime, timedelta
 from email.header import decode_header
-from datetime import datetime, timezone
-from groq import Groq
 
-GROQ_MODEL = "llama-3.1-8b-instant"
+from constants import AUTO_UPDATABLE_STATUSES
+from llm import DEFAULT_TEXT_MODELS, json_chat, text_models
+from reply_detector import detect_replies
+
+# How far back to look for bounces / auto-replies on each run
+LOOKBACK_DAYS = 30
+
 
 def get_imap_connection(gmail_address: str, app_password: str) -> imaplib.IMAP4_SSL:
     """Connect to Gmail via IMAP using App Password."""
@@ -14,16 +18,34 @@ def get_imap_connection(gmail_address: str, app_password: str) -> imaplib.IMAP4_
     mail.login(gmail_address, app_password)
     return mail
 
-def search_bounce_and_ooo_emails(mail: imaplib.IMAP4_SSL) -> list[dict]:
+
+def _imap_since_date(days: int = LOOKBACK_DAYS) -> str:
+    return (datetime.now(UTC) - timedelta(days=days)).strftime("%d-%b-%Y")
+
+
+def _fetch_message_id_header(mail: imaplib.IMAP4_SSL, msg_id: bytes) -> str | None:
+    """Fetch only the Message-ID header (cheap) without marking the message read."""
+    _, data = mail.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+    if not data or not isinstance(data[0], tuple):
+        return None
+    header = email.message_from_bytes(data[0][1])
+    value = header.get("Message-ID")
+    return value.strip() if value else None
+
+
+def search_bounce_and_ooo_emails(mail: imaplib.IMAP4_SSL, processed_ids: set) -> list[dict]:
     """
     Search Gmail inbox AND All Mail for:
     1. Bounce/delivery failure notifications (from mailer-daemon/postmaster)
     2. Out-of-office auto-reply emails
 
-    Returns a list of raw parsed email dicts.
+    Messages whose Message-ID is in `processed_ids` (handled on an earlier run)
+    are skipped. Returns a list of raw parsed email dicts.
     """
     results = []
+    seen_in_this_run = set()
     folders_to_search = ["INBOX", '"[Gmail]/All Mail"', '"[Gmail]/Spam"', '"[Gmail]/Trash"']
+    since = _imap_since_date()
 
     for folder in folders_to_search:
         try:
@@ -32,11 +54,11 @@ def search_bounce_and_ooo_emails(mail: imaplib.IMAP4_SSL) -> list[dict]:
                 continue
 
             # Search for bounce notifications
-            bounce_criteria = '(OR FROM "mailer-daemon" FROM "postmaster") SINCE "01-Jan-2026"'
+            bounce_criteria = f'(OR FROM "mailer-daemon" FROM "postmaster") SINCE "{since}"'
             _, bounce_data = mail.search(None, bounce_criteria)
 
             # Search for out-of-office replies
-            ooo_criteria = '(OR SUBJECT "out of office" SUBJECT "auto-reply") SINCE "01-Jan-2026"'
+            ooo_criteria = f'(OR SUBJECT "out of office" SUBJECT "auto-reply") SINCE "{since}"'
             _, ooo_data = mail.search(None, ooo_criteria)
 
             all_ids = set()
@@ -44,16 +66,25 @@ def search_bounce_and_ooo_emails(mail: imaplib.IMAP4_SSL) -> list[dict]:
                 if data and data[0]:
                     all_ids.update(data[0].split())
 
-            for msg_id in list(all_ids)[:100]:  # cap at 100 per folder
+            # Newest first, capped at 100 per folder
+            for msg_id in sorted(all_ids, key=int, reverse=True)[:100]:
                 try:
-                    _, msg_data = mail.fetch(msg_id, "(RFC822)")
+                    header_id = _fetch_message_id_header(mail, msg_id)
+                    if header_id and (header_id in processed_ids or header_id in seen_in_this_run):
+                        continue
+                    _, msg_data = mail.fetch(msg_id, "(BODY.PEEK[])")
                     raw = msg_data[0][1]
                     parsed = email.message_from_bytes(raw)
-                    results.append({
-                        "message_id": msg_id.decode(),
-                        "folder": folder,
-                        "parsed": parsed
-                    })
+                    if header_id:
+                        seen_in_this_run.add(header_id)
+                    results.append(
+                        {
+                            "message_id": msg_id.decode(),
+                            "header_message_id": header_id,
+                            "folder": folder,
+                            "parsed": parsed,
+                        }
+                    )
                 except Exception:
                     continue
 
@@ -61,6 +92,7 @@ def search_bounce_and_ooo_emails(mail: imaplib.IMAP4_SSL) -> list[dict]:
             continue
 
     return results
+
 
 def extract_body(msg) -> str:
     """Extract plain text body from a parsed email message."""
@@ -80,7 +112,8 @@ def extract_body(msg) -> str:
             pass
     return body[:3000]  # cap to avoid huge payloads to Groq
 
-def classify_email_with_groq(api_key: str, sender: str, subject: str, body: str) -> dict:
+
+def classify_email_with_groq(api_key: str, sender: str, subject: str, body: str, models=None) -> dict:
     """
     Use Groq to classify a Gmail notification email as:
     - hard_bounce: permanent delivery failure, extract the failed email address
@@ -89,8 +122,6 @@ def classify_email_with_groq(api_key: str, sender: str, subject: str, body: str)
 
     Returns a dict with type and extracted data.
     """
-    client = Groq(api_key=api_key)
-
     system_prompt = """You analyze email notification messages and classify them.
 
 Classification rules:
@@ -122,18 +153,12 @@ SUBJECT: {subject}
 BODY:
 {body}"""
 
-
     try:
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"}
+        result = json_chat(
+            api_key,
+            models or DEFAULT_TEXT_MODELS,
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
         )
-        result = json.loads(response.choices[0].message.content)
 
         # Validate required keys
         if "type" not in result:
@@ -143,26 +168,31 @@ BODY:
     except Exception as e:
         return {"type": "irrelevant", "confidence": 0.0, "reason": str(e)}
 
+
 def find_recipient_by_email(conn, email_address: str) -> dict | None:
     """
     Find the most recent recipient record matching the given email address.
     Returns the recipient row as a dict or None if not found.
     """
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT r.id, r.email, r.campaign_id, r.reply_status, r.follow_up_sent,
                c.name as campaign_name
         FROM recipients r
         JOIN campaigns c ON r.campaign_id = c.id
-        WHERE LOWER(r.email) = LOWER(?)
+        WHERE LOWER(r.email) = LOWER(?) AND r.status = 'sent'
         ORDER BY r.sent_at DESC
         LIMIT 1
-    """, (email_address.strip(),))
+    """,
+        (email_address.strip(),),
+    )
     row = cursor.fetchone()
     if row:
         columns = [d[0] for d in cursor.description]
-        return dict(zip(columns, row))
+        return dict(zip(columns, row, strict=True))
     return None
+
 
 def find_recipient_by_ooo_sender(conn, sender_email: str) -> dict | None:
     """
@@ -171,18 +201,33 @@ def find_recipient_by_ooo_sender(conn, sender_email: str) -> dict | None:
     """
     return find_recipient_by_email(conn, sender_email)
 
-def apply_bounce_update(conn, recipient_id: int) -> None:
-    """Mark a recipient as invalid_email due to hard bounce."""
+
+def apply_bounce_update(conn, recipient_id: int) -> bool:
+    """
+    Mark a recipient as invalid_email due to hard bounce.
+    Returns False (and changes nothing) if the status was set manually or is
+    already invalid — a human-set "interested" must never be overwritten.
+    """
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute("SELECT reply_status FROM recipients WHERE id = ?", (recipient_id,))
+    row = cursor.fetchone()
+    if not row or row[0] not in AUTO_UPDATABLE_STATUSES:
+        return False
+
+    cursor.execute(
+        """
         UPDATE recipients
         SET reply_status = 'invalid_email',
             exclude_followup = 1,
             status_updated_at = ?,
             error_message = 'Hard bounce — email address does not exist or is unreachable'
         WHERE id = ?
-    """, (datetime.now(timezone.utc).isoformat(), recipient_id))
+    """,
+        (datetime.now(UTC).isoformat(), recipient_id),
+    )
     conn.commit()
+    return True
+
 
 def apply_ooo_update(conn, recipient_id: int, return_date: str | None) -> None:
     """
@@ -194,23 +239,44 @@ def apply_ooo_update(conn, recipient_id: int, return_date: str | None) -> None:
     # Only update if currently no_reply — respect manual status updates
     cursor.execute("SELECT reply_status FROM recipients WHERE id = ?", (recipient_id,))
     row = cursor.fetchone()
-    if not row or row[0] != "no_reply":
-        return
+    if not row or row[0] not in (None, "no_reply"):
+        return False
 
-    cursor.execute("""
+    cursor.execute(
+        """
         UPDATE recipients
         SET reply_status = 'check_back',
             check_back_date = ?,
             status_updated_at = ?,
             reply_content = 'Auto-detected: Out-of-office reply received.'
         WHERE id = ?
-    """, (return_date, datetime.now(timezone.utc).isoformat(), recipient_id))
+    """,
+        (return_date, datetime.now(UTC).isoformat(), recipient_id),
+    )
     conn.commit()
+    return True
+
+
+def get_processed_message_ids(conn) -> set:
+    cursor = conn.cursor()
+    cursor.execute("SELECT message_id FROM processed_inbox_messages")
+    return {row[0] for row in cursor.fetchall()}
+
+
+def mark_message_processed(conn, header_message_id: str | None, classification: str) -> None:
+    if not header_message_id:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO processed_inbox_messages (message_id, classification, processed_at) VALUES (?, ?, ?)",
+        (header_message_id, classification, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
 
 def get_all_db_emails(conn) -> set:
     """Get lowercased set of all recipient emails stored in DB for fast lookup."""
     cursor = conn.cursor()
-    cursor.execute("SELECT LOWER(email) FROM recipients")
+    cursor.execute("SELECT LOWER(email) FROM recipients WHERE status = 'sent'")
     return {row[0] for row in cursor.fetchall() if row[0]}
 
 
@@ -225,14 +291,31 @@ def classify_email_fast(sender: str, subject: str, body: str, db_emails: set) ->
 
     # 1. Check for hard bounce
     is_bounce_sender = "mailer-daemon" in sender_lower or "postmaster" in sender_lower
-    is_bounce_subject = any(k in subject_lower for k in [
-        "delivery status notification", "undeliverable", "delivery failure",
-        "failure notice", "mail delivery failed", "returned to sender", "bounce"
-    ])
-    is_bounce_body = any(k in body_lower for k in [
-        "550 5.1.1", "user unknown", "does not exist", "account not found",
-        "invalid address", "mailbox unavailable", "address rejected", "diagnostic-code: smtp; 550"
-    ])
+    is_bounce_subject = any(
+        k in subject_lower
+        for k in [
+            "delivery status notification",
+            "undeliverable",
+            "delivery failure",
+            "failure notice",
+            "mail delivery failed",
+            "returned to sender",
+            "bounce",
+        ]
+    )
+    is_bounce_body = any(
+        k in body_lower
+        for k in [
+            "550 5.1.1",
+            "user unknown",
+            "does not exist",
+            "account not found",
+            "invalid address",
+            "mailbox unavailable",
+            "address rejected",
+            "diagnostic-code: smtp; 550",
+        ]
+    )
 
     if is_bounce_sender or is_bounce_subject or is_bounce_body:
         found_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', body)
@@ -243,13 +326,14 @@ def classify_email_fast(sender: str, subject: str, body: str, db_emails: set) ->
                     "type": "hard_bounce",
                     "failed_email": addr_clean,
                     "confidence": 0.95,
-                    "reason": "Matched delivery failure notification for recipient"
+                    "reason": "Matched delivery failure notification for recipient",
                 }
 
     # 2. Check for out of office
-    is_ooo_subject = any(k in subject_lower for k in [
-        "out of office", "auto-reply", "auto reply", "away from office", "on leave", "vacation reply"
-    ])
+    is_ooo_subject = any(
+        k in subject_lower
+        for k in ["out of office", "auto-reply", "auto reply", "away from office", "on leave", "vacation reply"]
+    )
     if is_ooo_subject:
         sender_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', sender)
         ooo_sender = sender_match.group(0).lower() if sender_match else None
@@ -259,7 +343,7 @@ def classify_email_fast(sender: str, subject: str, body: str, db_emails: set) ->
                 "ooo_sender_email": ooo_sender,
                 "return_date": None,
                 "confidence": 0.90,
-                "reason": "Matched auto-reply out of office email"
+                "reason": "Matched auto-reply out of office email",
             }
 
     return {"type": "irrelevant", "confidence": 0.0, "reason": "No fast pattern match"}
@@ -270,36 +354,64 @@ def run_inbox_monitor(config: dict, db_conn) -> dict:
     Full inbox monitoring pipeline:
     1. Connect to Gmail via IMAP
     2. Search inbox + All Mail for bounces and OOO replies
-    3. Classify each email with fast regex + Groq fallback
-    4. Match to recipients in DB
-    5. Apply status updates
-    6. Return a summary of what was found and updated
+    3. Classify each email with fast regex + Groq fallback, update recipients
+    4. Detect human replies to our emails (reply_detector) and record them
+    5. Return a summary of what was found and updated
     """
     gmail_address = config.get("gmail_address")
     app_password = config.get("gmail_app_password")
     groq_api_key = config.get("groq_api_key")
 
-    if not all([gmail_address, app_password, groq_api_key]):
-        return {"error": "Gmail or Groq credentials not configured"}
+    if not all([gmail_address, app_password]):
+        return {"error": "Gmail credentials not configured"}
 
     summary = {
         "bounces_detected": 0,
         "ooo_detected": 0,
+        "replies_detected": 0,
         "updated": 0,
         "skipped": 0,
         "errors": 0,
         "details": [],
-        "last_run": datetime.now(timezone.utc).isoformat()
+        "last_run": datetime.now(UTC).isoformat(),
     }
 
+    processed_ids = get_processed_message_ids(db_conn)
     try:
         mail = get_imap_connection(gmail_address, app_password)
-        emails = search_bounce_and_ooo_emails(mail)
-        mail.logout()
     except Exception as e:
         summary["error"] = f"IMAP connection failed: {str(e)}"
         return summary
 
+    try:
+        emails = search_bounce_and_ooo_emails(mail, processed_ids)
+        _process_bounces_and_ooo(emails, db_conn, groq_api_key, summary, text_models(config))
+
+        # Human replies — after bounce/OOO so those messages are already marked processed
+        processed_ids = get_processed_message_ids(db_conn)
+        replies = detect_replies(
+            mail,
+            db_conn,
+            config,
+            processed_ids,
+            lambda mid, kind: mark_message_processed(db_conn, mid, kind),
+        )
+        summary["replies_detected"] = replies["replies_detected"]
+        summary["updated"] += replies["statuses_updated"]
+        summary["details"] += replies["details"]
+    except Exception as e:
+        summary["error"] = f"Inbox scan failed: {e}"
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+    return summary
+
+
+def _process_bounces_and_ooo(emails, db_conn, groq_api_key, summary, models=None):
+    """Classify bounce/OOO notifications and update matching recipients (mutates summary)."""
     db_emails = get_all_db_emails(db_conn)
     seen_emails = set()  # avoid processing same address twice
 
@@ -324,8 +436,16 @@ def run_inbox_monitor(config: dict, db_conn) -> dict:
             classification = classify_email_fast(sender, subject, body, db_emails)
             if classification["type"] == "irrelevant":
                 # Fallback to Groq only if regex did not match
-                if "mailer-daemon" in sender.lower() or "postmaster" in sender.lower() or "out of office" in subject.lower() or "auto-reply" in subject.lower():
-                    classification = classify_email_with_groq(groq_api_key, sender, subject, body)
+                needs_ai = (
+                    "mailer-daemon" in sender.lower()
+                    or "postmaster" in sender.lower()
+                    or "out of office" in subject.lower()
+                    or "auto-reply" in subject.lower()
+                )
+                if needs_ai and groq_api_key:
+                    classification = classify_email_with_groq(groq_api_key, sender, subject, body, models)
+
+            mark_message_processed(db_conn, item.get("header_message_id"), classification["type"])
 
             if classification["type"] == "hard_bounce" and classification.get("confidence", 0) >= 0.75:
                 failed_email = classification.get("failed_email")
@@ -335,22 +455,27 @@ def run_inbox_monitor(config: dict, db_conn) -> dict:
                 summary["bounces_detected"] += 1
 
                 recipient = find_recipient_by_email(db_conn, failed_email)
-                if recipient:
-                    apply_bounce_update(db_conn, recipient["id"])
+                if recipient and apply_bounce_update(db_conn, recipient["id"]):
                     summary["updated"] += 1
-                    summary["details"].append({
-                        "type": "hard_bounce",
-                        "email": failed_email,
-                        "campaign": recipient["campaign_name"],
-                        "action": "Marked as invalid_email"
-                    })
+                    summary["details"].append(
+                        {
+                            "type": "hard_bounce",
+                            "email": failed_email,
+                            "campaign": recipient["campaign_name"],
+                            "action": "Marked as invalid_email",
+                        }
+                    )
                 else:
                     summary["skipped"] += 1
-                    summary["details"].append({
-                        "type": "hard_bounce",
-                        "email": failed_email,
-                        "action": "No matching recipient found in DB"
-                    })
+                    summary["details"].append(
+                        {
+                            "type": "hard_bounce",
+                            "email": failed_email,
+                            "action": "Already handled or manually set"
+                            if recipient
+                            else "No matching recipient found in DB",
+                        }
+                    )
 
             elif classification["type"] == "out_of_office" and classification.get("confidence", 0) >= 0.70:
                 ooo_sender = classification.get("ooo_sender_email")
@@ -360,21 +485,20 @@ def run_inbox_monitor(config: dict, db_conn) -> dict:
                 summary["ooo_detected"] += 1
 
                 recipient = find_recipient_by_ooo_sender(db_conn, ooo_sender)
-                if recipient:
-                    apply_ooo_update(db_conn, recipient["id"], classification.get("return_date"))
+                if recipient and apply_ooo_update(db_conn, recipient["id"], classification.get("return_date")):
                     summary["updated"] += 1
-                    summary["details"].append({
-                        "type": "out_of_office",
-                        "email": ooo_sender,
-                        "campaign": recipient["campaign_name"],
-                        "return_date": classification.get("return_date"),
-                        "action": "Set status to check_back"
-                    })
+                    summary["details"].append(
+                        {
+                            "type": "out_of_office",
+                            "email": ooo_sender,
+                            "campaign": recipient["campaign_name"],
+                            "return_date": classification.get("return_date"),
+                            "action": "Set status to check_back",
+                        }
+                    )
                 else:
                     summary["skipped"] += 1
 
         except Exception:
             summary["errors"] += 1
             continue
-
-    return summary

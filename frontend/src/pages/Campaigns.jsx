@@ -1,29 +1,36 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api'
+import usePoller from '../hooks/usePoller'
+import { errorMessage, useUI } from '../context/UIContext'
+import { formatDate } from '../utils/dates'
 
 export default function Campaigns() {
   const [campaigns, setCampaigns] = useState([])
   const [loading, setLoading] = useState(true)
   const [sendingCampaignId, setSendingCampaignId] = useState(null)
   const [sendProgress, setSendProgress] = useState({})
+  const poller = usePoller()
+  const { toast, confirm } = useUI()
 
   const fetchCampaigns = useCallback(() => {
     api.get('/campaigns')
       .then((res) => setCampaigns(res.data))
-      .catch(console.error)
+      .catch((err) => toast.error(errorMessage(err, 'Failed to load campaigns')))
       .finally(() => setLoading(false))
-  }, [])
+  }, [toast])
 
   useEffect(() => {
     fetchCampaigns()
   }, [fetchCampaigns])
 
   const handleSendRemaining = async (campaignId, total) => {
-    const confirmed = window.confirm(
-      `Send ${total} remaining draft email(s) for this campaign?`
-    )
-    if (!confirmed) return
+    const ok = await confirm({
+      title: 'Send remaining drafts?',
+      message: `Send ${total} remaining draft email(s) for this campaign?`,
+      confirmLabel: 'Send',
+    })
+    if (!ok) return
 
     setSendingCampaignId(campaignId)
     setSendProgress(prev => ({ ...prev, [campaignId]: { current: 0, total, status: 'sending' } }))
@@ -31,40 +38,40 @@ export default function Campaigns() {
     try {
       await api.post(`/campaign/${campaignId}/send`)
     } catch (err) {
-      const msg = err.response?.data?.error || 'Failed to start sending.'
-      alert(msg)
-      setSendingCampaignId(null)
-      return
+      if (err.response?.status !== 409) { // 409: already sending — just show its progress
+        toast.error(errorMessage(err, 'Failed to start sending.'))
+        setSendingCampaignId(null)
+        return
+      }
     }
 
-    const interval = setInterval(async () => {
-      try {
-        const res = await api.get(`/campaign/${campaignId}/progress`)
-        setSendProgress(prev => ({ ...prev, [campaignId]: res.data }))
-        if (res.data.status === 'complete') {
-          clearInterval(interval)
-          setSendingCampaignId(null)
-          fetchCampaigns()
-        }
-      } catch {
-        clearInterval(interval)
-        setSendingCampaignId(null)
-      }
-    }, 2000)
+    poller.start(async () => {
+      const res = await api.get(`/campaign/${campaignId}/progress`)
+      setSendProgress(prev => ({ ...prev, [campaignId]: res.data }))
+      if (res.data.status === 'sending') return false
+      setSendingCampaignId(null)
+      fetchCampaigns()
+      if (res.data.status === 'complete') toast.success('Campaign sent')
+      else toast.error('Sending stopped early — check the campaign for details')
+      return true
+    }, 2000, () => setSendingCampaignId(null))
   }
 
   const handleDeleteCampaign = async (campaignId, campaignName) => {
-    const confirmed = window.confirm(
-      `Are you sure you want to delete "${campaignName}"? This will permanently remove all recipients and email history for this campaign.`
-    )
-    if (!confirmed) return
+    const ok = await confirm({
+      title: 'Delete campaign?',
+      message: `"${campaignName}" and all its recipients and email history will be permanently removed.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    })
+    if (!ok) return
 
     try {
       await api.delete(`/campaign/${campaignId}`)
       fetchCampaigns()
+      toast.success('Campaign deleted')
     } catch (err) {
-      const msg = err.response?.data?.error || 'Failed to delete campaign.'
-      alert(msg)
+      toast.error(errorMessage(err, 'Failed to delete campaign.'))
     }
   }
 
@@ -95,8 +102,8 @@ export default function Campaigns() {
           </Link>
         </div>
       ) : (
-        <div className="bg-white border border-zinc-200 rounded-none overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-white border border-zinc-200 rounded-none overflow-x-auto">
+          <table className="w-full text-sm min-w-[640px]">
             <thead>
               <tr className="bg-zinc-50 border-b border-zinc-200">
                 <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Campaign</th>
@@ -112,7 +119,7 @@ export default function Campaigns() {
                 <tr key={c.id} className="hover:bg-zinc-50 transition-colors">
                   <td className="px-5 py-4 font-medium text-zinc-950">{c.name}</td>
                   <td className="px-5 py-4 text-zinc-500 font-mono text-xs">
-                    {new Date(c.created_at).toLocaleDateString()}
+                    {formatDate(c.created_at)}
                   </td>
                   <td className="px-5 py-4 text-center text-zinc-700 font-mono">
                     {c.total_recipients}

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import api from './api'
 import Navbar from './components/Navbar'
+import ErrorBoundary from './components/ErrorBoundary'
 import Dashboard from './pages/Dashboard'
 import Profile from './pages/Profile'
 import Settings from './pages/Settings'
@@ -11,18 +12,21 @@ import Search from './pages/Search'
 import SendProgress from './pages/SendProgress'
 import Campaigns from './pages/Campaigns'
 import CampaignDetail from './pages/CampaignDetail'
+import Pipeline from './pages/Pipeline'
+import NotFound from './pages/NotFound'
 
 export default function App() {
   const [profileComplete, setProfileComplete] = useState(null)
   const location = useLocation()
 
+  // Only needs checking until the profile is complete
   useEffect(() => {
+    if (profileComplete) return
     api.get('/profile')
       .then((res) => setProfileComplete(res.data.is_complete))
       .catch(() => setProfileComplete(false))
-  }, [location.pathname])
+  }, [location.pathname, profileComplete])
 
-  // Show nothing while checking profile status
   if (profileComplete === null) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -31,43 +35,30 @@ export default function App() {
     )
   }
 
+  // Everything except the profile page requires a completed profile
+  const gated = (element) => (profileComplete ? element : <Navigate to="/profile" replace />)
+
   return (
     <div className="min-h-screen bg-zinc-50 font-sans text-zinc-950">
       <Navbar />
       <main className="max-w-6xl mx-auto px-4 py-8">
-        <Routes>
-          <Route
-            path="/"
-            element={
-              profileComplete ? <Dashboard /> : <Navigate to="/profile" replace />
-            }
-          />
-          <Route path="/profile" element={<Profile onSave={() => setProfileComplete(true)} />} />
-          <Route
-            path="/settings"
-            element={
-              profileComplete ? <Settings /> : <Navigate to="/profile" replace />
-            }
-          />
-          <Route
-            path="/campaign/new"
-            element={
-              profileComplete ? <NewCampaign /> : <Navigate to="/profile" replace />
-            }
-          />
-          <Route path="/search" element={profileComplete ? <Search /> : <Navigate to="/profile" replace />} />
-          <Route path="/campaign/:campaignId/preview" element={<Preview />} />
-          <Route path="/campaign/:campaignId/send" element={<SendProgress />} />
-          <Route path="/campaign/:campaignId/followup/preview" element={<Preview isFollowUp />} />
-          <Route path="/campaign/:campaignId/followup/send" element={<SendProgress isFollowUp />} />
-          <Route
-            path="/campaigns"
-            element={
-              profileComplete ? <Campaigns /> : <Navigate to="/profile" replace />
-            }
-          />
-          <Route path="/campaign/:campaignId" element={<CampaignDetail />} />
-        </Routes>
+        <ErrorBoundary key={location.pathname}>
+          <Routes>
+            <Route path="/" element={gated(<Dashboard />)} />
+            <Route path="/profile" element={<Profile onSave={(complete) => setProfileComplete(complete)} />} />
+            <Route path="/settings" element={gated(<Settings />)} />
+            <Route path="/campaign/new" element={gated(<NewCampaign />)} />
+            <Route path="/campaigns" element={gated(<Campaigns />)} />
+            <Route path="/search" element={gated(<Search />)} />
+            <Route path="/pipeline" element={gated(<Pipeline />)} />
+            <Route path="/campaign/:campaignId" element={gated(<CampaignDetail />)} />
+            <Route path="/campaign/:campaignId/preview" element={gated(<Preview />)} />
+            <Route path="/campaign/:campaignId/send" element={gated(<SendProgress />)} />
+            <Route path="/campaign/:campaignId/followup/preview" element={gated(<Preview isFollowUp />)} />
+            <Route path="/campaign/:campaignId/followup/send" element={gated(<SendProgress isFollowUp />)} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </ErrorBoundary>
       </main>
     </div>
   )

@@ -1,12 +1,16 @@
 import { useState, useRef, useEffect } from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import api from '../api'
-import ContactHistoryPanel, { StatusBadge } from './ContactHistoryPanel'
+import ContactHistoryPanel from './ContactHistoryPanel'
+import StatusBadge from './StatusBadge'
+import { displayStatus } from '../constants/status'
+import { formatDate } from '../utils/dates'
 
 const navItems = [
   { to: '/', label: 'Dashboard' },
   { to: '/campaign/new', label: 'New Campaign' },
   { to: '/campaigns', label: 'History' },
+  { to: '/pipeline', label: 'Pipeline' },
   { to: '/search', label: 'Search' },
   { to: '/profile', label: 'Profile' },
   { to: '/settings', label: 'Settings' },
@@ -17,6 +21,8 @@ export default function Navbar() {
   const [results, setResults] = useState([])
   const [dropdownVisible, setDropdownVisible] = useState(false)
   const [selectedEmail, setSelectedEmail] = useState(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const location = useLocation()
   const searchInputRef = useRef(null)
   const dropdownRef = useRef(null)
   const navigate = useNavigate()
@@ -35,6 +41,9 @@ export default function Navbar() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
+
+  // Close the mobile menu after navigating
+  useEffect(() => { setMenuOpen(false) }, [location.pathname])
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -59,7 +68,7 @@ export default function Navbar() {
         .then(res => {
             if(active) setResults(res.data.results)
         })
-        .catch(console.error)
+        .catch(() => {})
     }, 300)
     
     return () => { active = false; clearTimeout(timeoutId); }
@@ -126,11 +135,11 @@ export default function Navbar() {
                           )}
                         </div>
                         <div className="shrink-0">
-                           <StatusBadge status={r.reply_status || r.send_status} />
+                           <StatusBadge status={displayStatus(r)} />
                         </div>
                       </div>
                       <div className="text-xs text-gray-400 mt-1 line-clamp-1">
-                        {r.campaign_name} · {new Date(r.sent_at).toLocaleDateString()}
+                        {r.campaign_name} · {r.sent_at ? formatDate(r.sent_at) : 'Not sent'}
                       </div>
                     </div>
                   ))}
@@ -144,7 +153,21 @@ export default function Navbar() {
               )}
             </div>
 
-            <div className="flex items-center gap-1 shrink-0 overflow-x-auto no-scrollbar">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((o) => !o)}
+              className="lg:hidden ml-auto p-2 text-zinc-700 hover:bg-zinc-100"
+              aria-label="Toggle navigation menu"
+              aria-expanded={menuOpen}
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {menuOpen
+                  ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />}
+              </svg>
+            </button>
+
+            <div className="hidden lg:flex items-center gap-1 shrink-0">
               {navItems.map((item) => (
                 <NavLink
                   key={item.to}
@@ -164,6 +187,36 @@ export default function Navbar() {
             </div>
           </div>
         </div>
+
+        {menuOpen && (
+          <div className="lg:hidden border-t border-zinc-200 bg-white">
+            <form onSubmit={handleSearchSubmit} className="md:hidden px-4 pt-3">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                className="block w-full px-3 py-2 border border-zinc-200 bg-zinc-50 text-sm focus:outline-none focus:bg-white focus:border-zinc-950"
+                placeholder="Search contacts..."
+              />
+            </form>
+            <div className="flex flex-col py-2">
+              {navItems.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.to === '/'}
+                  className={({ isActive }) =>
+                    `px-4 py-2.5 text-sm font-medium border-l-2 ${
+                      isActive ? 'border-zinc-950 text-zinc-950 bg-zinc-50' : 'border-transparent text-zinc-600 hover:bg-zinc-50'
+                    }`
+                  }
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
+          </div>
+        )}
       </nav>
 
       <ContactHistoryPanel 

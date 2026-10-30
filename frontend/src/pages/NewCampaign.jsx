@@ -1,226 +1,151 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
 import DuplicateWarning from '../components/DuplicateWarning'
+import GenerationProgress from '../components/GenerationProgress'
+import CsvImport from '../components/CsvImport'
+import usePoller from '../hooks/usePoller'
+import { useBlockedDomains } from '../context/BlockedDomainsContext'
+import { errorMessage, useUI } from '../context/UIContext'
+
+const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
+
+// Every distinct address in the pasted text (case-insensitive), in order.
+// The backend parser additionally extracts names; this is only for previews.
+function extractEmails(text) {
+  const seen = new Set()
+  const result = []
+  for (const match of text.matchAll(new RegExp(EMAIL_RE, 'g'))) {
+    const lower = match[0].toLowerCase()
+    if (!seen.has(lower)) {
+      seen.add(lower)
+      result.push(match[0])
+    }
+  }
+  return result
+}
+
+// Drop entries whose address exactly matches (case-insensitive) one of `emails`.
+// Substring matching would also remove e.g. "ba@x.com" when skipping "a@x.com".
+function removeEmails(text, emails) {
+  const drop = new Set(emails.map(e => e.toLowerCase()))
+  return text
+    .split(/[\n,]+/)
+    .filter(entry => {
+      const m = entry.match(EMAIL_RE)
+      return !(m && drop.has(m[0].toLowerCase()))
+    })
+    .join('\n')
+}
 
 export default function NewCampaign() {
   const navigate = useNavigate()
+  const poller = usePoller()
+  const { toast } = useUI()
+  const { isBlocked } = useBlockedDomains()
   const [form, setForm] = useState({
     name: '',
     email_list: '',
     goal: '',
     additional_context: '',
   })
-  const [parsedCount, setParsedCount] = useState(null)
   const [loading, setLoading] = useState(false)
   const [generationProgress, setGenerationProgress] = useState(null)
   const [campaignId, setCampaignId] = useState(null)
   const [error, setError] = useState('')
-  
-  const [parsedEmails, setParsedEmails] = useState([])
-  const [duplicates, setDuplicates] = useState([])
-  const [skippedEmails, setSkippedEmails] = useState(new Set())
-  const [showWarning, setShowWarning] = useState(false)
-  const [parseSummary, setParseSummary] = useState('')
-  const [blockedDomains, setBlockedDomains] = useState([])
-  const [blockedInPaste, setBlockedInPaste] = useState([])
 
-  useEffect(() => {
-    api.get('/blocked-domains')
-      .then(res => setBlockedDomains(res.data.map(d => d.domain)))
-      .catch(() => {})
-  }, [])
+  const [checked, setChecked] = useState(null) // { total, duplicates } from the last duplicate check
+  const [pendingDuplicates, setPendingDuplicates] = useState([])
+  const [skippedCount, setSkippedCount] = useState(0)
+  const [csvRows, setCsvRows] = useState(null) // structured recipients from a CSV import
 
   const handleChange = (e) => {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }))
   }
 
-  const extractEmails = (text) => {
-    const rawEmails = text.split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
-    const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/gi
-    const validEmails = []
-    
-    rawEmails.forEach(str => {
-      const match = str.match(emailRegex)
-      if (match) {
-        validEmails.push({ email: match[0], raw: str })
-      }
-    })
-    return validEmails
-  }
+  const currentEmails = csvRows ? csvRows.map((r) => r.email) : extractEmails(form.email_list)
+  const blockedInPaste = currentEmails.filter((e) => isBlocked(e))
 
-  const checkDuplicates = async (rawText) => {
-    const emails = extractEmails(rawText)
-    setParsedEmails(emails)
+  const checkDuplicates = async (emails) => {
+    setSkippedCount(0)
     if (emails.length === 0) {
-       setParseSummary('')
-       setShowWarning(false)
-       setBlockedInPaste([])
-       return
+      setChecked(null)
+      setPendingDuplicates([])
+      return
     }
-
-    // Check for blocked domains
-    const blocked = emails.filter(e => {
-      const domain = e.email.split('@')[1]?.toLowerCase()
-      return domain && blockedDomains.includes(domain)
-    })
-    setBlockedInPaste(blocked)
-
     try {
-      const res = await api.post('/campaign/check-duplicates', {
-        emails: emails.map(e => e.email)
-      })
-      
+      const res = await api.post('/campaign/check-duplicates', { emails })
       const dups = res.data.duplicates || []
-      
-      if (dups.length > 0) {
-         setDuplicates(dups)
-         setShowWarning(true)
-      } else {
-         setShowWarning(false)
-      }
-      
-      updateSummary(emails.length, dups.length, 0)
+      setChecked({ total: emails.length, duplicates: dups.length })
+      setPendingDuplicates(dups)
     } catch (err) {
-      console.error(err)
+      toast.error(errorMessage(err, 'Duplicate check failed'))
     }
   }
 
-  const updateSummary = (total, dupsCount, skippedCount) => {
-    const newCount = total - dupsCount
-    const included = dupsCount - skippedCount
-    setParseSummary(`✓ ${total} valid emails parsed · ${dupsCount} already contacted (${skippedCount} skipped, ${included} included) · ${newCount} new emails`)
+  const skip = (emails) => {
+    const drop = new Set(emails.map((e) => e.toLowerCase()))
+    if (csvRows) setCsvRows((rows) => rows.filter((r) => !drop.has(r.email.toLowerCase())))
+    else setForm((f) => ({ ...f, email_list: removeEmails(f.email_list, emails) }))
+    setPendingDuplicates((prev) => prev.filter((d) => !drop.has(d.email.toLowerCase())))
+    setSkippedCount((n) => n + emails.length)
   }
 
   const handleDecision = (email, action) => {
-    if (action === 'skip') {
-      const newSkipped = new Set(skippedEmails)
-      newSkipped.add(email)
-      setSkippedEmails(newSkipped)
-      
-      setForm(f => ({ ...f, email_list: f.email_list.split(/[\n,]+/).filter(l => !l.includes(email)).join('\n') }))
-      
-      setDuplicates(prev => prev.filter(d => d.email !== email))
-      updateSummary(parsedEmails.length, duplicates.length - 1, newSkipped.size)
-    } else if (action === 'include') {
-      setDuplicates(prev => prev.filter(d => d.email !== email))
-    }
-    
-    if (duplicates.length <= 1) setShowWarning(false)
+    if (action === 'skip') skip([email])
+    else setPendingDuplicates((prev) => prev.filter((d) => d.email !== email))
   }
 
-  const onSkipAll = () => {
-    const allDups = new Set([...skippedEmails, ...duplicates.map(d => d.email)])
-    setSkippedEmails(allDups)
-    
-    const dupEmailsList = duplicates.map(d => d.email)
-    setForm(f => ({ 
-      ...f, 
-      email_list: f.email_list.split(/[\n,]+/).filter(l => !dupEmailsList.some(e => l.includes(e))).join('\n')
-    }))
-    
-    setDuplicates([])
-    setShowWarning(false)
-    updateSummary(parsedEmails.length, 0, allDups.size)
-  }
-
-  const onIncludeAll = () => {
-    setDuplicates([])
-    setShowWarning(false)
-  }
+  const parseSummary = checked
+    ? `✓ ${checked.total} valid emails parsed · ${checked.duplicates} already contacted ` +
+      `(${skippedCount} skipped, ${checked.duplicates - skippedCount} included) · ${checked.total - checked.duplicates} new`
+    : ''
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
     setLoading(true)
 
+    let createdId = null
     try {
-      // Step 1: Create campaign
-      const createRes = await api.post('/campaign/new', form)
-      const { campaign_id, recipients_count } = createRes.data
-      setParsedCount(recipients_count)
+      const payload = csvRows ? { ...form, email_list: '', recipients: csvRows } : form
+      const createRes = await api.post('/campaign/new', payload)
+      const { campaign_id, recipients_count, skipped_blocked } = createRes.data
+      createdId = campaign_id
       setCampaignId(campaign_id)
+      if (skipped_blocked?.length) {
+        toast.info(`Skipped ${skipped_blocked.length} email(s) from blocked domains`)
+      }
 
-      // Step 2: Generate emails
-      setGenerationProgress({ total: recipients_count, completed: 0, failed: 0, status: "generating", errors: [] })
-      const genRes = await api.post(`/campaign/${campaign_id}/generate`)
-      setGenerationProgress(prev => ({ ...prev, total: genRes.data.total }))
+      setGenerationProgress({ total: recipients_count, completed: 0, failed: 0, status: 'generating', errors: [] })
+      await api.post(`/campaign/${campaign_id}/generate`)
 
-      const interval = setInterval(async () => {
-        const progressRes = await api.get(`/campaign/${campaign_id}/generate-progress`);
-        const data = progressRes.data;
-        setGenerationProgress(data);
-
-        if (data.status === "complete" || data.status === "error") {
-          clearInterval(interval);
-          if (data.status === "complete") {
-            navigate(`/campaign/${campaign_id}/preview`)
-          }
-        }
-      }, 1500);
-
+      poller.start(async () => {
+        const { data } = await api.get(`/campaign/${campaign_id}/generate-progress`)
+        setGenerationProgress(data)
+        if (data.status === 'generating') return false
+        if (data.status === 'complete') navigate(`/campaign/${campaign_id}/preview`)
+        return true
+      }, 1500, () => setGenerationProgress((prev) => ({ ...prev, status: 'error' })))
     } catch (err) {
-      setGenerationProgress(null);
-      setError(err.response?.data?.error || 'Failed to start generation');
-      setLoading(false);
+      // Don't leave an empty campaign behind if generation couldn't even start
+      if (createdId) await api.delete(`/campaign/${createdId}`).catch(() => {})
+      setGenerationProgress(null)
+      setCampaignId(null)
+      setError(errorMessage(err, 'Failed to start generation'))
+      setLoading(false)
     }
   }
 
-  // Show generating state
   if (generationProgress) {
     return (
-      <div id="generating-screen" className="max-w-2xl mx-auto text-center py-20 border border-zinc-200 bg-white mt-10">
-        <div className="generation-progress-box border border-gray-200 rounded-lg p-6 mt-4 mx-8 bg-gray-50 text-left shadow-sm">
-          {/* Header */}
-          <div className="flex justify-between items-center mb-3">
-            <span className="text-sm font-medium text-gray-700">
-              {generationProgress.status === "complete"
-                ? "✅ Generation Complete"
-                : generationProgress.status === "error"
-                ? "❌ Generation Stopped"
-                : "⚡ Generating Emails..."}
-            </span>
-            <span className="text-sm text-gray-500 font-mono">
-              {generationProgress.completed} / {generationProgress.total}
-            </span>
-          </div>
-          
-          {/* Progress bar track */}
-          <div className="w-full bg-gray-200 rounded-full h-2.5 mb-3 overflow-hidden">
-            <div
-              className="bg-green-500 h-2.5 rounded-full transition-all duration-500"
-              style={{
-                width: generationProgress.total > 0
-                  ? `${Math.round((generationProgress.completed / generationProgress.total) * 100)}%`
-                  : "0%"
-              }}
-            />
-          </div>
-          
-          {/* Sub-stats */}
-          <div className="flex gap-4 text-xs font-mono text-gray-500">
-            <span>✅ {generationProgress.completed} generated</span>
-            {generationProgress.failed > 0 && (
-              <span className="text-red-500">❌ {generationProgress.failed} failed</span>
-            )}
-            {generationProgress.status === "generating" && (
-              <span className="text-blue-500 animate-pulse ml-auto">Running in parallel...</span>
-            )}
-          </div>
-          
-          {/* Error list — only show if there are errors */}
-          {generationProgress.errors && generationProgress.errors.length > 0 && (
-            <div className="mt-4 text-[10px] font-mono text-red-600 bg-red-50 border border-red-200 rounded p-3 max-h-32 overflow-y-auto text-left">
-              <div className="font-bold mb-1">Errors encountered:</div>
-              {generationProgress.errors.map((e, i) => (
-                <div key={i} className="mb-1 truncate"><span className="font-semibold">{e.email}:</span> {e.error}</div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {generationProgress.status === "error" ? (
-          <div className="mt-8">
+      <div id="generating-screen" className="max-w-2xl mx-auto py-16 px-4 sm:px-8 border border-zinc-200 bg-white mt-10">
+        <GenerationProgress progress={generationProgress} />
+        {generationProgress.status !== 'generating' && generationProgress.status !== 'complete' && campaignId ? (
+          <div className="mt-8 text-center">
+            <p className="text-xs font-mono text-zinc-500 mb-4">
+              Drafts that were generated are saved. You can regenerate the missing ones from the preview.
+            </p>
             <button
               onClick={() => navigate(`/campaign/${campaignId}/preview`)}
               className="px-6 py-3 bg-indigo-700 text-white font-display font-bold uppercase tracking-widest text-xs hover:bg-indigo-800 transition-colors"
@@ -269,26 +194,69 @@ export default function NewCampaign() {
             <span>Email List *</span>
             <span className="text-zinc-500 font-mono normal-case tracking-normal text-[10px] bg-zinc-100 px-2 py-0.5 border border-zinc-200">paste any format</span>
           </label>
-          <textarea
-            id="email-list"
-            name="email_list"
-            value={form.email_list}
-            onChange={handleChange}
-            onBlur={(e) => checkDuplicates(e.target.value)}
-            required
-            rows={6}
-            placeholder={"john@company.com\njane.doe@startup.io, mark@techcorp.com\nAlice <alice@acme.com>\nBob Smith - bob@smith.com"}
-            className="w-full border border-zinc-300 rounded-none px-4 py-3 text-sm font-mono leading-relaxed focus:ring-1 focus:ring-zinc-900 focus:border-zinc-900 outline-none placeholder-zinc-400 bg-zinc-50 focus:bg-white transition-colors"
-          />
-          
-          <div className="flex justify-between items-center mt-2">
+          {csvRows ? (
+            <div className="border border-zinc-300 bg-white">
+              <div className="flex justify-between items-center px-4 py-2 border-b border-zinc-200 bg-zinc-50">
+                <span className="text-xs font-mono text-zinc-700">
+                  {csvRows.length} recipient{csvRows.length !== 1 ? 's' : ''} imported
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setCsvRows(null); setChecked(null); setPendingDuplicates([]) }}
+                  className="text-xs text-red-600 hover:underline"
+                >
+                  Clear import
+                </button>
+              </div>
+              <div className="max-h-56 overflow-auto">
+                <table className="w-full text-xs">
+                  <thead className="text-zinc-500 text-left">
+                    <tr>{['Email', 'Name', 'Company', 'Role', 'Notes'].map((h) => <th key={h} className="px-3 py-1.5 font-medium">{h}</th>)}</tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100 font-mono">
+                    {csvRows.map((r) => (
+                      <tr key={r.email}>
+                        <td className="px-3 py-1.5">{r.email}</td>
+                        <td className="px-3 py-1.5">{r.name}</td>
+                        <td className="px-3 py-1.5">{r.company}</td>
+                        <td className="px-3 py-1.5">{r.role}</td>
+                        <td className="px-3 py-1.5 max-w-[12rem] truncate" title={r.notes}>{r.notes}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <textarea
+              id="email-list"
+              name="email_list"
+              value={form.email_list}
+              onChange={handleChange}
+              onBlur={(e) => checkDuplicates(extractEmails(e.target.value))}
+              required
+              rows={6}
+              placeholder={"john@company.com\njane.doe@startup.io, mark@techcorp.com\nAlice <alice@acme.com>\nBob Smith - bob@smith.com"}
+              className="w-full border border-zinc-300 rounded-none px-4 py-3 text-sm font-mono leading-relaxed focus:ring-1 focus:ring-zinc-900 focus:border-zinc-900 outline-none placeholder-zinc-400 bg-zinc-50 focus:bg-white transition-colors"
+            />
+          )}
+
+          <div className="flex flex-wrap justify-between items-center gap-2 mt-2">
              <p className="text-[11px] font-mono text-zinc-500">
-               Supports: newline, comma, space-separated, Name &lt;email&gt;
+               {csvRows
+                 ? 'Company, role and notes are used to personalise each email.'
+                 : 'Supports: newline, comma, space-separated, Name <email>, Name - email — or import a CSV/Excel file with company/role/notes columns.'}
              </p>
-             <button type="button" onClick={() => checkDuplicates(form.email_list)} className="text-[11px] font-mono font-medium text-indigo-700 hover:bg-indigo-50 px-2 py-1 rounded-none border border-indigo-200 transition-colors uppercase tracking-wider">
+             <button type="button" onClick={() => checkDuplicates(currentEmails)} className="text-[11px] font-mono font-medium text-indigo-700 hover:bg-indigo-50 px-2 py-1 rounded-none border border-indigo-200 transition-colors uppercase tracking-wider">
                Check Duplicates
              </button>
           </div>
+
+          {!csvRows && (
+            <div className="mt-2">
+              <CsvImport onImport={(rows) => { setCsvRows(rows); checkDuplicates(rows.map((r) => r.email)) }} />
+            </div>
+          )}
           
           {parseSummary ? (
             <div className="mt-3 text-xs font-mono text-emerald-800 bg-zinc-50 px-4 py-2.5 rounded-none border border-zinc-200 border-l-2 border-l-emerald-500 flex items-center gap-2">
@@ -302,18 +270,18 @@ export default function NewCampaign() {
               <p className="mt-1 mb-2">The following emails are from blocked domains and will be skipped:</p>
               <ul className="list-disc list-inside text-[11px]">
                 {blockedInPaste.map(e => (
-                  <li key={e.email}>{e.email}</li>
+                  <li key={e}>{e}</li>
                 ))}
               </ul>
             </div>
           )}
 
-          {showWarning && duplicates.length > 0 && (
-            <DuplicateWarning 
-              duplicates={duplicates} 
-              onSkipAll={onSkipAll} 
-              onIncludeAll={onIncludeAll} 
-              onPerRecipientDecision={handleDecision} 
+          {pendingDuplicates.length > 0 && (
+            <DuplicateWarning
+              duplicates={pendingDuplicates}
+              onSkipAll={() => skip(pendingDuplicates.map((d) => d.email))}
+              onIncludeAll={() => setPendingDuplicates([])}
+              onPerRecipientDecision={handleDecision}
             />
           )}
         </div>
@@ -356,10 +324,10 @@ export default function NewCampaign() {
           <button
             id="create-campaign-btn"
             type="submit"
-            disabled={loading || generationProgress?.status === "generating"}
+            disabled={loading}
             className="w-full py-3.5 bg-indigo-700 text-white font-display font-bold uppercase tracking-widest text-sm rounded-none hover:bg-indigo-800 disabled:opacity-50 disabled:bg-zinc-400 transition-colors"
           >
-            {generationProgress?.status === "generating" ? 'Generating...' : 'Create Campaign & Generate'}
+            {loading ? 'Starting...' : 'Create Campaign & Generate'}
           </button>
         </div>
       </form>

@@ -1,0 +1,24 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, import sorting, bugbear, pyupgrade
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = [
+    "E501",   # long lines: prompts and SQL read better unwrapped; the formatter handles code
+    "B008",   # function calls in defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/conftest.py" = ["E402"]   # env vars must be set before importing the app
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "ai_generator", "app", "automation", "common", "config", "constants", "db", "email_sender",
+    "followup_service", "inbox_monitor", "jobs", "reply_detector", "resume_parser", "routes",
+    "scheduling", "sending", "utils", "tests",
+]
+
+[tool.ruff.format]
+quote-style = "preserve"

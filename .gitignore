@@ -12,3 +12,11 @@ frontend/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# SQLite WAL files and temp config writes
+backend/outreach.db-wal
+backend/outreach.db-shm
+backend/*.tmp
+backend/venv/
+.pytest_cache/
+backend/.env

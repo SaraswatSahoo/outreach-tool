@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import api from '../api'
+import { errorMessage, useUI } from '../context/UIContext'
 
 export default function Profile({ onSave }) {
   const [form, setForm] = useState({
@@ -20,7 +21,7 @@ export default function Profile({ onSave }) {
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [parsing, setParsing] = useState(false)
-  const [showAnalysis, setShowAnalysis] = useState(false)
+  const { toast } = useUI()
 
   useEffect(() => {
     api.get('/profile')
@@ -29,8 +30,8 @@ export default function Profile({ onSave }) {
         setHasResume(res.data.has_resume)
         setResumeParsed(res.data.resume_parsed)
       })
-      .catch(console.error)
-  }, [])
+      .catch((err) => toast.error(errorMessage(err, 'Failed to load your profile')))
+  }, [toast])
 
   const handleChange = (e) => {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }))
@@ -43,9 +44,9 @@ export default function Profile({ onSave }) {
     setSaving(true)
 
     try {
-      await api.post('/profile', form)
+      const res = await api.post('/profile', form)
       setFlash('Profile saved successfully!')
-      if (onSave) onSave()
+      if (onSave) onSave(res.data.is_complete)
       setTimeout(() => setFlash(''), 3000)
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to save profile')
@@ -78,7 +79,10 @@ export default function Profile({ onSave }) {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       setHasResume(true)
-      if (res.data.parsed) {
+      if (res.data.parse_error) {
+        setResumeParsed(null)
+        setError(`Resume uploaded, but parsing failed: ${res.data.parse_error}`)
+      } else if (res.data.parsed && Object.keys(res.data.parsed).length > 0) {
         setResumeParsed(res.data.parsed)
         setFlash('Resume uploaded and parsed successfully!')
       } else {

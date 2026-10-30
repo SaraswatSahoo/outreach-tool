@@ -6,11 +6,14 @@ Incorporates resume highlights for personalization.
 
 import json
 import random
+import re
+import threading
 import time
-from groq import Groq
-from utils import resolve_company_name
 
-GROQ_MODEL = "llama-3.1-8b-instant"
+from groq import Groq
+
+from llm import DEFAULT_TEXT_MODELS, NoModelAvailable, is_model_unavailable, model_kwargs, unavailable_message
+from utils import resolve_company_name
 
 SYSTEM_PROMPT = """You are helping a college student write personalised cold outreach emails for internship/job opportunities.
 These emails will be sent directly from the student's Gmail. They must feel like real, human-written emails — not templates, not cover letters, not LinkedIn messages.
@@ -18,7 +21,7 @@ These emails will be sent directly from the student's Gmail. They must feel like
 MANDATORY EMAIL STRUCTURE (follow this every time):
 1. Greeting line: Start with "Hi [Name]," if name is known, or "Hi there," if unknown. Never "Dear Sir/Madam". Never skip the greeting.
 2. Opening sentence: A natural, varied opener that isn't "I've been following your work". It could be:
-   - A direct, confident intro ("I'm Vinayak, a third-year ChemE student at NIT Durgapur, and I wanted to reach out about...")
+   - A direct, confident intro ("I'm Priya, a third-year CS student at <college>, and I wanted to reach out about...")
    - A brief, genuine observation about the company (only if it feels specific and natural — not forced flattery)
    - Getting straight to the point ("I came across [Company] while researching ML startups and thought I'd reach out directly.")
    Vary this opener every single time. Never repeat the same structure across emails.
@@ -43,28 +46,10 @@ TONE:
 - Direct and concise — get to the point quickly
 - Warm but not sycophantic — genuine, not flattering
 
-LENGTH: 200-240 words for the body (including greeting and sign-off). Shorter is better if the message is complete.
+LENGTH: 120-170 words for the body (including greeting and sign-off). Shorter is better if the message is complete.
 
 OUTPUT FORMAT: Return ONLY a valid JSON object: {"subject": "...", "body": "..."}
 The body must include the greeting line and sign-off. No markdown, no extra text."""
-
-
-FOLLOWUP_SYSTEM_PROMPT = """You are helping a college student write a brief follow-up email for an unanswered internship/job outreach.
-
-MANDATORY EMAIL STRUCTURE:
-1. Greeting: "Hi [Name]," or "Hi there," — same as the original email
-2. Opening: A natural reference to the previous email (e.g., "Just wanted to follow up on my note from last week." or "Circling back on my previous email in case it got buried.")
-3. Body (1–2 sentences max): A very brief re-statement of interest — do NOT repeat the full pitch
-4. Soft closing ask: Low-pressure, open-ended (e.g., "Even a quick note on whether this is the right time would be great.")
-5. Sign-off: "Best," + first name
-
-RULES:
-- 80–110 words total including greeting and sign-off
-- Warm and non-pushy — confident, not desperate
-- Do NOT use: "I hope this email finds you well", "I wanted to circle back" as the first three words of every email (vary it), "Dear Sir/Madam"
-- Sound like a real person following up, not an automated sequence
-
-OUTPUT FORMAT: Return ONLY valid JSON: {"subject": "Re: [original subject]", "body": "..."}"""
 
 
 def build_resume_highlights(resume_parsed: dict) -> str:
@@ -74,7 +59,7 @@ def build_resume_highlights(resume_parsed: dict) -> str:
     """
     if not resume_parsed:
         return "No resume data available."
-    
+
     lines = []
 
     projects = resume_parsed.get("projects", [])
@@ -83,11 +68,10 @@ def build_resume_highlights(resume_parsed: dict) -> str:
 
     if projects:
         lines.append("""PROJECTS (listed in random order — evaluate ALL of them before choosing):
-Selection rule: Choose the project whose tech stack most closely matches this recipient's company domain.
-- If company is in AI/ML/healthcare → prefer Coeur AI
-- If company is in SaaS/ad-tech/marketing/e-commerce → prefer AdGenAI
-- If company is in research/education/NLP/data → prefer The Rigveda Project
-- If unclear → pick whichever has the most tech overlap with the job description
+Selection rule: Choose the project whose domain and tech stack most closely match this recipient's company.
+- Infer what the company does from its name/domain and the campaign goal
+- Prefer the project with the strongest overlap in industry (e.g. healthcare, fintech, e-commerce, research) and technology
+- If unclear → pick whichever has the most tech overlap with the campaign goal
 Do NOT default to the first project listed. Actively reason about fit.""")
         for p in projects[:4]:  # max 4 projects passed to AI
             title = p.get("title", "")
@@ -114,14 +98,28 @@ Do NOT default to the first project listed. Actively reason about fit.""")
     return "\n".join(lines) if lines else "No structured resume data extracted."
 
 
-def generate_email(profile, recipient, campaign_goal, additional_context, api_key, resume_parsed=None):
+def generate_email(
+    profile, recipient, campaign_goal, additional_context, api_key, resume_parsed=None, fallback_keys=(), models=None
+):
     """
     Generate a unique cold outreach email for a single recipient.
     """
     domain = recipient["email"].split("@")[1]
-    company = resolve_company_name(domain, api_key)
-    recipient_name = recipient.get("name") or "address them naturally without a explicit name if unknown"
-    
+    company = (
+        recipient.get("company")
+        or resolve_company_name(domain)
+        or "an unknown company (personal email address — do not guess a company name)"
+    )
+    recipient_name = recipient.get("name") or "Unknown (use \"Hi there,\")"
+    extra_recipient_lines = ""
+    if recipient.get("role"):
+        extra_recipient_lines += f"\n- Role/Title: {recipient['role']}"
+    if recipient.get("notes"):
+        extra_recipient_lines += (
+            f"\n- Personal notes (use these to make the email specific to this person; "
+            f"weave in naturally, don't quote verbatim): {recipient['notes']}"
+        )
+
     resume_block = build_resume_highlights(resume_parsed) if resume_parsed else "Not available."
 
     user_prompt = f"""Generate a cold outreach email from the following student to the recipient at {company}.
@@ -129,11 +127,11 @@ def generate_email(profile, recipient, campaign_goal, additional_context, api_ke
 STUDENT PROFILE:
 - Name: {profile.get('name', '')}
 - College: {profile.get('college', '')}, {profile.get('branch', '')}, {profile.get('year', '')}
-- CGPA: {profile.get('cgpa', 'Not specified')}
+- CGPA: {profile.get('cgpa') or 'Not specified'}
 - Skills: {profile.get('skills', '')}
 - Bio: {profile.get('bio', '')}
-- GitHub: {profile.get('github', 'Not provided')}
-- LinkedIn: {profile.get('linkedin', 'Not provided')}
+- GitHub: {profile.get('github') or 'Not provided'}
+- LinkedIn: {profile.get('linkedin') or 'Not provided'}
 
 RESUME HIGHLIGHTS (use to personalise the email — pick 1–2 specific things to naturally mention):
 {resume_block}
@@ -141,7 +139,7 @@ RESUME HIGHLIGHTS (use to personalise the email — pick 1–2 specific things t
 RECIPIENT:
 - Email: {recipient['email']}
 - Name: {recipient_name}
-- Company: {company}
+- Company: {company}{extra_recipient_lines}
 
 CAMPAIGN GOAL:
 {campaign_goal}
@@ -171,75 +169,55 @@ Best,
 
 Return ONLY valid JSON: {{"subject": "...", "body": "..."}}"""
 
-    return _call_groq(SYSTEM_PROMPT, user_prompt, api_key)
+    return _call_groq(
+        SYSTEM_PROMPT,
+        user_prompt,
+        api_key,
+        fallback_keys=fallback_keys,
+        models=models,
+        validator=lambda r: validate_email_output(r, max_words=200),
+    )
 
 
-def generate_followup(profile, original_subject, original_body, followup_context, api_key, resume_parsed=None):
-    """
-    Generate a follow-up email.
-    """
-    resume_block = build_resume_highlights(resume_parsed) if resume_parsed else "Not available."
-    first_name = profile.get('name', '').split()[0] if profile.get('name') else 'Student'
-
-    user_prompt = f"""Generate a follow-up email that will be sent as a reply to the email thread below.
-
-The student is following up because they haven't received a response. The tone should be:
-- Brief (80–120 words)
-- Warm and non-pushy — not desperate
-- Reference the original email naturally ("just wanted to follow up on my previous message")
-- End with a soft, open-ended ask
-
-ORIGINAL EMAIL SENT:
-Subject: {original_subject}
-Body: {original_body}
-
-STUDENT PROFILE:
-- Name: {profile.get('name', '')}
-- College: {profile.get('college', '')}, {profile.get('branch', '')}, {profile.get('year', '')}
-- Skills: {profile.get('skills', '')}
-
-RESUME HIGHLIGHTS (optional — only reference if naturally relevant to the follow-up):
-{resume_block}
-
-FOLLOW-UP CONTEXT FROM USER:
-{followup_context or 'None provided — write a standard polite follow-up.'}
-
-SIGN-OFF:
-End the follow-up body with exactly this format:
-
-Best,
-{first_name}
-
-Return ONLY valid JSON: {{"subject": "Re: {original_subject}", "body": "..."}}"""
-
-    return _call_groq(FOLLOWUP_SYSTEM_PROMPT, user_prompt, api_key)
-
-
-def generate_contextual_followup(profile, original_subject, original_body,
-                                  recipient_email, recipient_name,
-                                  reply_status, reply_content,
-                                  check_back_date, global_context,
-                                  api_key, resume_parsed=None):
+def generate_contextual_followup(
+    profile,
+    original_subject,
+    original_body,
+    recipient_email,
+    recipient_name,
+    reply_status,
+    reply_content,
+    check_back_date,
+    global_context,
+    api_key,
+    resume_parsed=None,
+    step=1,
+    max_steps=1,
+    previous_followups=None,
+    company=None,
+    fallback_keys=(),
+    models=None,
+):
     """
     Generate a context-aware follow-up email based on the recipient's reply status.
     Each status produces a fundamentally different tone and intent.
+    `step` is 1 for the first follow-up, 2 for the second, ...; earlier
+    follow-up bodies are passed so the new one doesn't repeat them.
     """
 
     domain = recipient_email.split("@")[1]
-    company = resolve_company_name(domain, api_key)
+    company = company or resolve_company_name(domain) or "unknown (personal email address)"
     first_name = profile.get('name', '').split()[0] if profile.get('name') else 'Student'
 
     greeting = f"Hi {recipient_name.split()[0].capitalize()}," if recipient_name else "Hi there,"
 
     # Build status-specific instruction block
-    status_instructions = _build_status_instructions(
-        reply_status, reply_content, check_back_date, company
-    )
+    status_instructions = _build_status_instructions(reply_status, reply_content, check_back_date, company)
 
     resume_block = build_resume_highlights(resume_parsed) if resume_parsed else "Not available."
 
     system_prompt = f"""You are helping a college student write a follow-up email for an internship/job outreach.
-The follow-up must be tailored precisely to the situation described below — tone, length, and intent 
+The follow-up must be tailored precisely to the situation described below — tone, length, and intent
 must match the recipient's reply status exactly.
 
 GENERAL RULES:
@@ -259,12 +237,12 @@ SITUATION:
 ORIGINAL EMAIL:
 Subject: {original_subject}
 Body: {original_body}
-
+{_sequence_block(step, max_steps, previous_followups)}
 STUDENT PROFILE:
 - Name: {profile.get('name', '')}
 - College: {profile.get('college', '')}, {profile.get('year', '')}
 - Skills: {profile.get('skills', '')}
-- GitHub: {profile.get('github', 'Not provided')}
+- GitHub: {profile.get('github') or 'Not provided'}
 
 RESUME HIGHLIGHTS (use only if directly relevant):
 {resume_block}
@@ -287,7 +265,34 @@ Best,
 
 Return ONLY valid JSON: {{"subject": "Re: {original_subject}", "body": "..."}}"""
 
-    return _call_groq(system_prompt, user_prompt, api_key)
+    return _call_groq(
+        system_prompt,
+        user_prompt,
+        api_key,
+        fallback_keys=fallback_keys,
+        models=models,
+        validator=lambda r: validate_email_output(r, max_words=180),
+    )
+
+
+def _sequence_block(step, max_steps, previous_followups):
+    """Extra instructions for the 2nd+ follow-up in a thread."""
+    if step <= 1 and not previous_followups:
+        return ""
+    lines = [f"\nTHIS IS FOLLOW-UP #{step} in this thread."]
+    for i, body in enumerate(previous_followups or [], start=1):
+        lines.append(f"FOLLOW-UP #{i} ALREADY SENT (do NOT repeat its wording, opener or ask):\n{body}")
+    if step >= max_steps:
+        lines.append(
+            "This is the FINAL follow-up: keep it very short (40-70 words), say you won't keep "
+            "following up, and leave the door open warmly. No guilt-tripping."
+        )
+    else:
+        lines.append(
+            "Keep it shorter than the previous follow-up and take a fresh angle "
+            "(e.g. one new relevant detail, or a simpler yes/no question)."
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _build_status_instructions(reply_status, reply_content, check_back_date, company):
@@ -318,7 +323,7 @@ TONE & INTENT:
 - Open by referencing THEIR suggestion to follow up (e.g., "You had mentioned reaching out again — following up as suggested")
 - Do NOT re-introduce yourself fully — they remember you
 - Keep it brief — 90 to 130 words
-- Mention your availability for May to July 2026 in one line
+- If the student's availability is mentioned in the context below, restate it in one line
 - End with a soft, specific ask — a quick call, a 15-min chat, etc.
 {date_line}{reply_section}"""
 
@@ -351,73 +356,166 @@ TONE & INTENT:
 TONE: Semi-formal, brief, warm. 80 to 120 words.{reply_section}"""
 
 
-def _call_groq(system_prompt, user_prompt, api_key, retries=4, model=GROQ_MODEL):
+class RateLimitExhausted(Exception):
+    """Every model in the fallback chain is rate-limited on every configured key."""
+
+
+def _is_rate_limit(err_str):
+    return any(
+        k in err_str
+        for k in (
+            "TOKENS PER DAY",
+            "REQUESTS PER DAY",
+            "TOKENS PER MINUTE",
+            "RATE_LIMIT",
+            "RATE LIMIT",
+            "429",
+        )
+    )
+
+
+# Phrases the prompts forbid; a draft containing one is regenerated
+BANNED_PHRASES = (
+    "i hope this email finds you well",
+    "i am writing to express my interest",
+    "i would be honored",
+    "i am a passionate individual",
+    "i believe my skills could be a great fit",
+    "dear sir/madam",
+    "dear sir or madam",
+    "bringing to the table",
+    "cutting-edge",
+    "synergy",
+)
+
+# Unfilled template placeholders such as "[Name]" or "[Company Name]"
+_PLACEHOLDER_RE = re.compile(r"\[(?:[^\]]*\b(?:name|company|your|recipient|insert|position|role)\b[^\]]*)\]", re.I)
+
+
+def validate_email_output(result, max_words):
+    """Return a description of the first quality problem in a generated email, or None."""
+    subject, body = result.get("subject", ""), result.get("body", "")
+    if not str(subject).strip() or not str(body).strip():
+        return "empty subject or body"
+    text = f"{subject}\n{body}"
+    match = _PLACEHOLDER_RE.search(text)
+    if match:
+        return f"unfilled placeholder {match.group(0)}"
+    lowered = text.lower()
+    for phrase in BANNED_PHRASES:
+        if phrase in lowered:
+            return f"banned phrase '{phrase}'"
+    words = len(str(body).split())
+    if words > max_words:
+        return f"too long ({words} words)"
+    return None
+
+
+# (api_key, model) -> monotonic time until which it's known to be rate-limited.
+# Shared by all worker threads so they stop hammering a limited key.
+_cooldowns = {}
+_cooldowns_lock = threading.Lock()
+MINUTE_COOLDOWN = 60
+DAY_COOLDOWN = 60 * 60
+
+
+def _cooling_down(key, model):
+    with _cooldowns_lock:
+        return _cooldowns.get((key, model), 0) > time.monotonic()
+
+
+def _start_cooldown(key, model, err_str):
+    seconds = DAY_COOLDOWN if "PER DAY" in err_str else MINUTE_COOLDOWN
+    with _cooldowns_lock:
+        _cooldowns[(key, model)] = time.monotonic() + seconds
+
+
+def _call_groq(system_prompt, user_prompt, api_key, retries=4, validator=None, fallback_keys=(), models=None):
     """
     Call the Groq API and parse the JSON response.
-    Retries on rate limits or service unavailable.
+    - Bad/malformed JSON or a draft failing `validator`: retry (up to `retries` attempts)
+    - 503/overloaded: exponential backoff, then retry
+    - Rate limit: try the same model on each of the other keys first, then fall
+      back to the next model. Limited keys are skipped by every thread for a
+      cooldown period. If everything is limited, raise RateLimitExhausted.
+    - Model retired / not available: skip to the next model. If no model is
+      usable, raise NoModelAvailable with a hint to update Settings.
     """
-    client = Groq(api_key=api_key)
-
+    models = models or DEFAULT_TEXT_MODELS
+    keys = [api_key] + [k for k in fallback_keys if k and k != api_key]
     last_error = None
-    for attempt in range(retries):
-        try:
-            # Add random seed variation for uniqueness
-            seed_note = f"\n[Variation seed: {random.randint(1000, 9999)}]"
+    unavailable = []
 
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt + seed_note}
-                ],
-                temperature=0.9,
-                response_format={"type": "json_object"}
-            )
-
-            text = response.choices[0].message.content.strip()
-            result = json.loads(text)
-
-            if "subject" not in result or "body" not in result:
-                raise ValueError("Response missing 'subject' or 'body' keys")
-
-            return result
-
-        except (json.JSONDecodeError, ValueError) as e:
-            last_error = e
-            if attempt < retries - 1:
+    for model in models:
+        model_gone = False
+        for key in keys:
+            if model_gone:
+                break
+            if _cooling_down(key, model):
+                last_error = last_error or f"{model} rate-limited on all keys"
                 continue
-            raise Exception(f"Failed to parse Groq response after {retries} attempts: {e}")
-            
-        except Exception as e:
-            last_error = e
-            err_str = str(e).upper()
-            FALLBACK_MODELS = [
-                "llama-3.1-8b-instant",
-                "llama-3.3-70b-versatile",
-                "llama-3.2-11b-vision-preview",
-                "llama-3.2-3b-preview",
-            ]
-
-            if "TOKENS PER DAY" in err_str or "REQUESTS PER DAY" in err_str or "TOKENS PER MINUTE" in err_str or "RATE_LIMIT" in err_str or "429" in err_str:
+            client = Groq(api_key=key)
+            for attempt in range(retries):
                 try:
-                    current_index = FALLBACK_MODELS.index(model)
-                except ValueError:
-                    current_index = -1
+                    # Add random seed variation for uniqueness
+                    seed_note = f"\n[Variation seed: {random.randint(1000, 9999)}]"
 
-                if current_index < len(FALLBACK_MODELS) - 1:
-                    next_model = FALLBACK_MODELS[current_index + 1]
-                    print(f"Rate limit hit on {model}. Waiting 2s and trying next model: {next_model}...")
-                    time.sleep(2)
-                    return _call_groq(system_prompt, user_prompt, api_key, retries, model=next_model)
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt + seed_note},
+                        ],
+                        temperature=0.9,
+                        response_format={"type": "json_object"},
+                        **model_kwargs(model),
+                    )
 
-                raise Exception(f"All models exhausted due to rate limits: {e}")
-                
-            elif "503" in err_str or "UNAVAILABLE" in err_str or "OVERLOADED" in err_str:
-                wait = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s
-                print(f"Groq API error ({e}) on model {model} — retrying in {wait}s (attempt {attempt+1}/{retries})")
-                time.sleep(wait)
+                    text = response.choices[0].message.content.strip()
+                    result = json.loads(text)
+
+                    if "subject" not in result or "body" not in result:
+                        raise ValueError("Response missing 'subject' or 'body' keys")
+
+                    # Quality check: regenerate drafts that break the rules, but on the
+                    # last attempt accept the result rather than failing the recipient.
+                    issue = validator(result) if validator else None
+                    if issue and attempt < retries - 1:
+                        print(f"Regenerating draft ({issue})")
+                        last_error = issue
+                        continue
+
+                    return result
+
+                except (json.JSONDecodeError, ValueError) as e:
+                    last_error = e
+                    continue
+
+                except Exception as e:
+                    last_error = e
+                    err_str = str(e).upper()
+
+                    if is_model_unavailable(err_str):
+                        print(f"Model {model} is unavailable (retired?); trying the next model...")
+                        unavailable.append(model)
+                        model_gone = True
+                        break  # next model — no key can use it
+                    elif _is_rate_limit(err_str):
+                        _start_cooldown(key, model, err_str)
+                        print(f"Rate limit hit on {model} for key …{key[-4:]}; trying another key/model...")
+                        break  # next key (then next model)
+                    elif "503" in err_str or "UNAVAILABLE" in err_str or "OVERLOADED" in err_str:
+                        wait = 5 * (2**attempt)  # 5s, 10s, 20s, 40s
+                        print(
+                            f"Groq API error ({e}) on model {model} — retrying in {wait}s (attempt {attempt + 1}/{retries})"
+                        )
+                        time.sleep(wait)
+                    else:
+                        raise Exception(f"Groq API error: {e}") from e
             else:
-                raise Exception(f"Groq API error: {e}")
+                # Retries exhausted on this key/model without a rate limit
+                raise Exception(f"Groq request failed after {retries} attempts on {model}. Last error: {last_error}")
 
-    raise Exception(f"Groq API unavailable/failed after {retries} retries. Last error: {last_error}")
-
+    if len(unavailable) == len(models):
+        raise NoModelAvailable(unavailable_message(models))
+    raise RateLimitExhausted(f"All keys and models are rate-limited: {last_error}")

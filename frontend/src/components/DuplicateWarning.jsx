@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
-import { StatusBadge } from './ContactHistoryPanel'
+import StatusBadge from './StatusBadge'
+import { formatDate } from '../utils/dates'
 
 export default function DuplicateWarning({ duplicates, onSkipAll, onIncludeAll, onPerRecipientDecision }) {
   if (!duplicates || duplicates.length === 0) return null
@@ -19,7 +20,7 @@ export default function DuplicateWarning({ duplicates, onSkipAll, onIncludeAll, 
               <StatusBadge status={dup.reply_status} />
             </div>
             <div className="text-amber-800 text-xs">
-              Last contacted: {new Date(dup.last_contacted).toLocaleDateString()} · Campaign: {dup.campaign_name}
+              Last contacted: {formatDate(dup.last_contacted)} · Campaign: {dup.campaign_name}
             </div>
             <div className="flex gap-2 mt-1">
               <button 

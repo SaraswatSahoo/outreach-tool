@@ -1,107 +1,89 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
 import api from '../api'
-import ContactHistoryPanel, { StatusBadge } from '../components/ContactHistoryPanel'
+import ContactHistoryPanel from '../components/ContactHistoryPanel'
+import StatusBadge from '../components/StatusBadge'
+import { REPLY_STATUSES, displayStatus } from '../constants/status'
+import { domainOf, useBlockedDomains } from '../context/BlockedDomainsContext'
+import { errorMessage, useUI } from '../context/UIContext'
+import { formatDate } from '../utils/dates'
 
 export default function Search() {
   const [searchParams, setSearchParams] = useSearchParams()
   const q = searchParams.get('q') || ''
-  
+
   const [query, setQuery] = useState(q)
   const [statusFilter, setStatusFilter] = useState('all')
   const [daysFilter, setDaysFilter] = useState('')
   const [campaignFilter, setCampaignFilter] = useState('')
-  
+
   const [campaigns, setCampaigns] = useState([])
   const [results, setResults] = useState([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
-  
+
   const [reengagementData, setReengagementData] = useState([])
   const [showReengagement, setShowReengagement] = useState(false)
-  
+
   const [selectedEmail, setSelectedEmail] = useState(null)
-  const [blockedDomains, setBlockedDomains] = useState([])
-  
+  const { isBlocked, toggle } = useBlockedDomains()
+  const { toast } = useUI()
+
+  // Keep the input in sync when ?q= changes (e.g. searching from the navbar)
   useEffect(() => {
-    let active = true;
-    api.get('/campaigns').then(res => {
-      if(active) setCampaigns(res.data)
-    }).catch(console.error)
-    
+    setQuery(q)
+    setPage(1)
+  }, [q])
+
+  useEffect(() => {
+    let active = true
+    api.get('/campaigns')
+      .then(res => { if (active) setCampaigns(res.data) })
+      .catch(() => {})
     api.get('/reengagement?min_days=14&max_days=60&status=no_reply,check_back')
-      .then(res => {
-        if(active) setReengagementData(res.data.candidates)
-      })
-      .catch(console.error)
-
-    api.get('/blocked-domains')
-      .then(res => {
-        if(active) setBlockedDomains(res.data.map(d => d.domain))
-      })
-      .catch(console.error)
-
-    return () => { active = false };
+      .then(res => { if (active) setReengagementData(res.data.candidates) })
+      .catch(() => {})
+    return () => { active = false }
   }, [])
-  
+
+  const hasFilter = statusFilter !== 'all' || !!daysFilter || !!campaignFilter
+  const canSearch = q.length >= 2 || hasFilter
+
   useEffect(() => {
-    if (!q || q.length < 2) {
+    if (!canSearch) {
       setResults([])
       setTotal(0)
       return
     }
-    
-    let active = true;
+
+    let active = true
     setLoading(true)
-    let url = `/search?q=${encodeURIComponent(q)}&page=${page}`
-    if (statusFilter !== 'all') url += `&status=${encodeURIComponent(statusFilter)}`
-    if (daysFilter) url += `&days=${daysFilter}`
-    if (campaignFilter) url += `&campaign_id=${campaignFilter}`
-    
-    api.get(url)
+    const params = new URLSearchParams({ page: String(page) })
+    if (q.length >= 2) params.set('q', q)
+    if (statusFilter !== 'all') params.set('status', statusFilter)
+    if (daysFilter) params.set('days', daysFilter)
+    if (campaignFilter) params.set('campaign_id', campaignFilter)
+
+    api.get(`/search?${params}`)
       .then(res => {
         if (active) {
-            setResults(res.data.results)
-            setTotal(res.data.total)
-            setTotalPages(res.data.pages)
+          setResults(res.data.results)
+          setTotal(res.data.total)
+          setTotalPages(res.data.pages)
         }
       })
-      .catch(console.error)
-      .finally(() => {
-        if(active) setLoading(false)
-      })
+      .catch((err) => toast.error(errorMessage(err, 'Search failed')))
+      .finally(() => { if (active) setLoading(false) })
 
-    return () => { active = false };
-  }, [q, statusFilter, daysFilter, campaignFilter, page])
+    return () => { active = false }
+  }, [q, statusFilter, daysFilter, campaignFilter, page, canSearch, toast])
 
   const handleSearchSubmit = (e) => {
     e.preventDefault()
-    if (query.length >= 2) {
-      setPage(1)
-      setSearchParams({ q: query })
-    }
-  }
-
-  const toggleDomainBlock = async (domain) => {
-    if (!domain) return
-    if (blockedDomains.includes(domain)) {
-      try {
-        await api.delete(`/blocked-domains/${domain}`)
-        setBlockedDomains(prev => prev.filter(d => d !== domain))
-      } catch (err) {
-        console.error('Failed to unblock domain:', err)
-      }
-    } else {
-      const reason = window.prompt(`Reason for blocking ${domain}? (optional)`) ?? ''
-      try {
-        await api.post('/blocked-domains', { domain, reason })
-        setBlockedDomains(prev => [...prev, domain])
-      } catch (err) {
-        console.error('Failed to block domain:', err)
-      }
-    }
+    setPage(1)
+    setSearchParams(query.trim() ? { q: query.trim() } : {})
   }
 
   return (
@@ -141,13 +123,9 @@ export default function Search() {
             className="border-zinc-300 rounded-none bg-zinc-50 focus:bg-white focus:ring-1 focus:ring-zinc-900 font-mono text-xs normal-case tracking-normal px-2 py-1 outline-none transition-colors"
           >
             <option value="all">All Statuses</option>
-            <option value="no_reply">No Reply</option>
-            <option value="check_back">Check Back</option>
-            <option value="interested">Interested</option>
-            <option value="no_openings">No Openings</option>
-            <option value="interview_scheduled">Interview Scheduled</option>
-            <option value="final_rejection">Rejected</option>
-            <option value="invalid_email">Invalid Email</option>
+            {REPLY_STATUSES.map(({ value, label }) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
           </select>
         </label>
         
@@ -187,13 +165,13 @@ export default function Search() {
       ) : results.length > 0 ? (
         <>
           <div className="text-zinc-500 font-mono text-xs uppercase tracking-widest mb-4">
-            {total} result{total !== 1 ? 's' : ''} for "{q}"
+            {total} result{total !== 1 ? 's' : ''}{q ? ` for "${q}"` : ''}
           </div>
           
           <div className="space-y-4 mb-8">
             {results.map(r => {
-              const domain = r.email?.split('@')[1]?.toLowerCase()
-              const blocked = domain && blockedDomains.includes(domain)
+              const domain = domainOf(r.email)
+              const blocked = isBlocked(domain)
               return (
                 <div 
                   key={r.id} 
@@ -214,7 +192,7 @@ export default function Search() {
                     </div>
                     <div className="flex items-center gap-3" onClick={e => e.stopPropagation()}>
                       <button
-                        onClick={() => toggleDomainBlock(domain)}
+                        onClick={() => toggle(domain)}
                         className={`text-[10px] font-mono px-2.5 py-1 rounded-none border transition-colors uppercase tracking-widest ${
                           blocked
                             ? 'bg-red-50 text-red-700 border-red-300 hover:bg-red-100'
@@ -224,11 +202,11 @@ export default function Search() {
                       >
                         {blocked ? 'UNBLOCK' : 'BLOCK DOMAIN'}
                       </button>
-                      <StatusBadge status={r.reply_status || r.send_status} />
+                      <StatusBadge status={displayStatus(r)} />
                     </div>
                   </div>
                   <div className="text-xs font-mono text-zinc-500 mt-2">
-                    {r.campaign_name} · <span className="text-zinc-400">Sent {new Date(r.sent_at).toLocaleDateString()}</span>
+                    {r.campaign_name} · <span className="text-zinc-400">{r.sent_at ? `Sent ${formatDate(r.sent_at)}` : `Not sent (${r.send_status})`}</span>
                   </div>
                   <div className="text-sm text-zinc-600 mt-3 truncate max-w-2xl bg-zinc-50 p-2 border border-zinc-100 font-mono">
                     {r.subject}
@@ -263,11 +241,15 @@ export default function Search() {
             </div>
           )}
         </>
-      ) : q ? (
+      ) : canSearch ? (
         <div className="text-center py-16 font-mono text-sm text-zinc-500 bg-zinc-50 border border-dashed border-zinc-300">
-          No contacts found for "{q}"
+          No contacts found{q ? ` for "${q}"` : ' matching these filters'}
         </div>
-      ) : null}
+      ) : (
+        <p className="text-center py-8 font-mono text-xs text-zinc-400">
+          Type at least 2 characters, or pick a filter to browse contacts.
+        </p>
+      )}
 
       {/* Re-engagement Candidates Section */}
       {reengagementData.length > 0 && (
@@ -298,7 +280,7 @@ export default function Search() {
                     <div>
                       <div className="font-display font-bold text-zinc-900">{cand.email}</div>
                       <div className="text-[11px] font-mono text-zinc-500 mt-1 uppercase tracking-wider">
-                        {cand.campaign_name} <span className="mx-2 text-zinc-300">|</span> {new Date(cand.sent_at).toLocaleDateString()}
+                        {cand.campaign_name} <span className="mx-2 text-zinc-300">|</span> {formatDate(cand.sent_at)}
                       </div>
                     </div>
                     <div className="flex items-center gap-4">
@@ -321,14 +303,8 @@ export default function Search() {
       <ContactHistoryPanel 
         email={selectedEmail} 
         isOpen={!!selectedEmail} 
-        onClose={() => setSelectedEmail(null)} 
-        onBlockUpdated={(domain, isBlocked) => {
-          if (isBlocked) {
-            setBlockedDomains(prev => [...prev, domain])
-          } else {
-            setBlockedDomains(prev => prev.filter(d => d !== domain))
-          }
-        }}
+        onClose={() => setSelectedEmail(null)}
+        onStatusUpdated={(id, status) => setResults(prev => prev.map(r => (r.id === id ? { ...r, reply_status: status } : r)))}
       />
     </div>
   )

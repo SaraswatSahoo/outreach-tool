@@ -4,117 +4,108 @@ Includes robust email list parsing.
 """
 
 import re
-import json
-from groq import Groq
 
-_company_cache = {
-    "gmail.com": "Company",
-    "yahoo.com": "Company",
-    "outlook.com": "Company",
-    "hotmail.com": "Company",
+# Personal/free mailbox providers: the domain says nothing about the employer
+FREE_MAIL_DOMAINS = {
+    "gmail.com",
+    "googlemail.com",
+    "yahoo.com",
+    "yahoo.co.in",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "msn.com",
+    "icloud.com",
+    "me.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
+    "zoho.com",
+    "yandex.com",
+    "gmx.com",
+    "mail.com",
+    "rediffmail.com",
+}
+
+KNOWN_COMPANIES = {
     "google.com": "Google",
     "microsoft.com": "Microsoft",
     "amazon.com": "Amazon",
     "apple.com": "Apple",
     "meta.com": "Meta",
+    "fb.com": "Meta",
 }
+
+# Second-level suffixes where the company label sits one level further left
+_MULTI_PART_SUFFIXES = {
+    "co.uk",
+    "org.uk",
+    "ac.uk",
+    "co.in",
+    "org.in",
+    "ac.in",
+    "net.in",
+    "com.au",
+    "net.au",
+    "co.jp",
+    "co.nz",
+    "com.br",
+    "com.sg",
+    "com.cn",
+    "co.za",
+    "com.mx",
+    "co.kr",
+}
+
+# Mail-server style subdomains that aren't part of the company name
+_GENERIC_SUBDOMAINS = {"mail", "email", "smtp", "mx", "corp", "hr", "careers", "jobs", "team", "www"}
+
+_company_cache = {}
+
 
 def resolve_company_name(domain: str, groq_api_key: str = None) -> str:
     """
-    Fast local resolution of company name from domain to eliminate extra blocking API calls.
+    Best-effort company name from an email domain, resolved locally (no API calls).
+      mail.stripe.com   -> Stripe
+      acme-labs.co.uk   -> Acme Labs
+      gmail.com         -> "" (personal address; employer unknown)
     """
-    domain_clean = domain.lower().strip()
+    domain_clean = (domain or "").lower().strip().lstrip("@")
+    if not domain_clean:
+        return ""
     if domain_clean in _company_cache:
         return _company_cache[domain_clean]
 
-    name_part = domain_clean.split(".")[0]
-    name_clean = re.sub(r'[-_]', ' ', name_part).title()
-    name_clean = re.sub(r'\bIts\b', 'IT Solutions', name_clean)
+    if domain_clean in FREE_MAIL_DOMAINS:
+        name = ""
+    elif domain_clean in KNOWN_COMPANIES:
+        name = KNOWN_COMPANIES[domain_clean]
+    else:
+        labels = domain_clean.split(".")
+        suffix_len = 2 if ".".join(labels[-2:]) in _MULTI_PART_SUFFIXES else 1
+        candidates = [part for part in labels[:-suffix_len] if part not in _GENERIC_SUBDOMAINS]
+        label = candidates[-1] if candidates else labels[0]
+        name = re.sub(r"[-_]+", " ", label).title()
+        if domain_clean.split(".")[-1] == "edu" or ".ac." in f".{domain_clean}":
+            name = name.upper() if len(name) <= 5 else name
 
-    _company_cache[domain_clean] = name_clean
-    return name_clean
-    """
-    Resolve a proper company name from an email domain.
-    e.g. nisargaits.com → Nisarga IT Solutions
-    Falls back to capitalized domain if lookup fails.
-    """
-    domain_clean = domain.lower().strip()
+    _company_cache[domain_clean] = name
+    return name
 
-    # Return cached result if available
-    if domain_clean in _company_cache:
-        return _company_cache[domain_clean]
-
-    fallback = domain_clean.split(".")[0].capitalize()
-
-    try:
-        # Step 1: Quick DuckDuckGo search
-        results = []
-        with DDGS() as ddgs:
-            hits = list(ddgs.text(f"{domain_clean} company", max_results=4))
-            results.extend(hits)
-
-        snippets = "\n".join([
-            f"Title: {r.get('title', '')}\nSnippet: {r.get('body', '')}"
-            for r in results[:4]
-        ]) or "No results found."
-
-        # Step 2: Ask Groq to extract the real company name
-        client = Groq(api_key=groq_api_key)
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",  # use fast/cheap model for this simple task
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You extract the official company name from a domain and web search results. "
-                        "Return ONLY valid JSON: {\"company_name\": \"Official Name\"} "
-                        "If unsure, return the best guess based on the domain. Never return null."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Domain: {domain_clean}\n\n"
-                        f"Web search results:\n{snippets}\n\n"
-                        f"What is the official company name for this domain?"
-                    )
-                }
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"}
-        )
-
-        result = json.loads(response.choices[0].message.content)
-        company_name = result.get("company_name", fallback).strip()
-
-        # Sanity check — if result is empty or too long, use fallback
-        if not company_name or len(company_name) > 60:
-            company_name = fallback
-
-    except Exception as e:
-        print(f"Company name lookup failed for {domain_clean}: {e}")
-        company_name = fallback
-
-    _company_cache[domain_clean] = company_name
-    return company_name
 
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
 # Pattern: Name <email>
-ANGLE_BRACKET_PATTERN = re.compile(
-    r"(.+?)\s*<\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\s*>"
-)
+ANGLE_BRACKET_PATTERN = re.compile(r"(.+?)\s*<\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\s*>")
 
 # Pattern: Name - email
-DASH_PATTERN = re.compile(
-    r"(.+?)\s*-\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"
-)
+DASH_PATTERN = re.compile(r"(.+?)\s*-\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})")
 
 
 def parse_email_list(raw_text):
     """
     Parse a raw text block containing emails in various formats.
-    
+
     Supported formats:
     - One per line
     - Comma-separated
@@ -122,7 +113,7 @@ def parse_email_list(raw_text):
     - Name <email>
     - Name - email
     - Mixed formats
-    
+
     Returns a deduplicated list of {"email": str, "name": str|None} dicts.
     """
     if not raw_text or not raw_text.strip():

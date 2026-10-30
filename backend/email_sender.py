@@ -3,14 +3,15 @@ Gmail SMTP email sending logic.
 Supports plain text emails with PDF attachment and thread continuity headers.
 """
 
+import os
 import smtplib
 import socket
-import os
+import ssl
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-from email.utils import make_msgid, formatdate
+from email.utils import formatdate, make_msgid
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587  # TLS
@@ -28,7 +29,12 @@ def _connect_smtp(host=SMTP_HOST, port=SMTP_PORT, timeout=30):
             infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
             if infos:
                 ipv4_ip = infos[0][4][0]
-                return smtplib.SMTP(ipv4_ip, port, timeout=timeout)
+                server = smtplib.SMTP(timeout=timeout)
+                server.connect(ipv4_ip, port)
+                # connect() records the IP as the host; restore the hostname so
+                # STARTTLS verifies the certificate against smtp.gmail.com.
+                server._host = host
+                return server
         raise
 
 
@@ -41,6 +47,7 @@ def send_email(
     body,
     resume_path,
     reply_to_message_id=None,
+    references=None,
 ):
     """
     Send an email via Gmail SMTP with optional resume attachment and threading.
@@ -53,7 +60,8 @@ def send_email(
         subject: Email subject line
         body: Plain text email body
         resume_path: Path to resume PDF file
-        reply_to_message_id: Original Message-ID for follow-up threading
+        reply_to_message_id: Message-ID being replied to (In-Reply-To), for threading
+        references: Full list of earlier Message-IDs in the thread, oldest first
 
     Returns:
         The Message-ID of the sent email
@@ -67,31 +75,44 @@ def send_email(
     msg["Subject"] = subject
     msg["Date"] = formatdate(localtime=True)
 
-    message_id = make_msgid()
+    # Use the sender's domain rather than this machine's hostname
+    message_id = make_msgid(domain=sender_email.split("@")[-1])
     msg["Message-ID"] = message_id
 
     # Threading headers for follow-ups
     if reply_to_message_id:
         msg["In-Reply-To"] = reply_to_message_id
-        msg["References"] = reply_to_message_id
+        msg["References"] = " ".join(references or [reply_to_message_id])
 
     msg.attach(MIMEText(body, "plain"))
 
     # Attach resume PDF
     if resume_path and os.path.exists(resume_path):
         with open(resume_path, "rb") as f:
-            part = MIMEBase("application", "octet-stream")
+            part = MIMEBase("application", "pdf")
             part.set_payload(f.read())
             encoders.encode_base64(part)
-            part.add_header(
-                "Content-Disposition", 'attachment; filename="Resume.pdf"'
-            )
+            part.add_header("Content-Disposition", 'attachment; filename="Resume.pdf"')
             msg.attach(part)
 
     with _connect_smtp(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
+        server.starttls(context=ssl.create_default_context())
         server.login(sender_email, app_password)
         server.sendmail(sender_email, recipient_email, msg.as_string())
 
     return message_id
 
+
+def send_with_config(config, recipient_email, subject, body, resume_path, reply_to_message_id=None, references=None):
+    """send_email() using the Gmail credentials and display name from config."""
+    return send_email(
+        sender_email=config["gmail_address"],
+        sender_name=config["profile"]["name"],
+        app_password=config["gmail_app_password"],
+        recipient_email=recipient_email,
+        subject=subject,
+        body=body,
+        resume_path=resume_path,
+        reply_to_message_id=reply_to_message_id,
+        references=references,
+    )

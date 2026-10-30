@@ -1,8 +1,8 @@
-import json
 import pdfplumber
-from groq import Groq
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
+from constants import RESUME_TEXT_PATH
+from llm import DEFAULT_RESUME_MODEL, DEFAULT_TEXT_MODELS, json_chat
+
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extract all text from the resume PDF."""
@@ -19,12 +19,11 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return ""
 
 
-def parse_resume_with_groq(api_key: str, resume_text: str) -> dict:
+def parse_resume_with_groq(api_key: str, resume_text: str, models=None) -> dict:
     """
     Use Groq to parse raw resume text into structured data.
     Returns a dict with projects, experience, education, achievements, skills.
     """
-    client = Groq(api_key=api_key)
 
     system_prompt = """You are a resume parser. Given raw resume text, extract structured information.
 Return ONLY a valid JSON object with exactly these keys:
@@ -48,31 +47,29 @@ Rules:
 
 {resume_text}"""
 
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt}
-        ],
+    return json_chat(
+        api_key,
+        models or [DEFAULT_RESUME_MODEL, *DEFAULT_TEXT_MODELS],
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
         temperature=0.1,  # Low temperature for accurate extraction
-        response_format={"type": "json_object"}
     )
 
-    raw = response.choices[0].message.content
-    parsed = json.loads(raw)
-    return parsed
 
-
-def parse_resume(pdf_path: str, groq_api_key: str) -> dict:
+def parse_resume(pdf_path: str, groq_api_key: str, models=None) -> dict:
     """
     Full pipeline: extract text from PDF → parse with Groq → return structured dict.
     Called when a new resume is uploaded.
     """
     resume_text = extract_text_from_pdf(pdf_path)
     if not resume_text or len(resume_text) < 100:
-        raise ValueError("Could not extract meaningful text from the resume PDF. "
-                         "Ensure the PDF is not image-only or password-protected.")
-    
-    structured = parse_resume_with_groq(groq_api_key, resume_text)
-    structured["raw_text"] = resume_text  # Store raw text too, for reference
+        raise ValueError(
+            "Could not extract meaningful text from the resume PDF. "
+            "Ensure the PDF is not image-only or password-protected."
+        )
+
+    structured = parse_resume_with_groq(groq_api_key, resume_text, models)
+
+    # Keep the raw text next to the PDF for reference rather than bloating config.json
+    with open(RESUME_TEXT_PATH, "w", encoding="utf-8") as f:
+        f.write(resume_text)
     return structured

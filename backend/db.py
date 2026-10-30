@@ -302,10 +302,27 @@ def _migration_2_cascading_deletes(conn):
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _migration_3_email_checks(conn):
+    """Cache of verification-service results, so free credits aren't spent twice on an address."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_checks (
+            email TEXT PRIMARY KEY,
+            verdict TEXT NOT NULL,
+            reason TEXT,
+            source TEXT NOT NULL,
+            checked_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
 # (version, migration). Append new migrations; never edit or reorder old ones.
 MIGRATIONS = [
     (1, _migration_1_baseline),
     (2, _migration_2_cascading_deletes),
+    (3, _migration_3_email_checks),
 ]
 
 

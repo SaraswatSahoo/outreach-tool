@@ -34,6 +34,9 @@ export default function Settings() {
     ai_model: '',
     ai_fallback_model: '',
     ai_resume_model: '',
+    verify_provider: '',
+    verify_api_key: '',
+    verify_with_service: true,
     send_window_enabled: false,
     send_window_start: 9,
     send_window_end: 18,
@@ -73,6 +76,9 @@ export default function Settings() {
           ai_model: res.data.ai_model || '',
           ai_fallback_model: res.data.ai_fallback_model || '',
           ai_resume_model: res.data.ai_resume_model || '',
+          verify_provider: res.data.verify_provider || '',
+          verify_api_key: '',
+          verify_with_service: res.data.verify_with_service ?? true,
         }))
         setToClear([])
       })
@@ -220,6 +226,17 @@ export default function Settings() {
 
         <AiModels form={form} onChange={handleChange} defaults={status?.default_models} hasKey={!!status?.groq_keys?.some((k) => k.configured)} />
 
+        <EmailVerification
+          form={form}
+          onChange={handleChange}
+          status={status}
+          clearing={toClear.includes('verify_api_key')}
+          onClearKey={() => {
+            setToClear((prev) => [...prev, 'verify_api_key'])
+            setForm((prev) => ({ ...prev, verify_api_key: '' }))
+          }}
+        />
+
         {/* Send Delay */}
         <div className="pb-6 border-b border-zinc-200">
           <label htmlFor="send-delay" className="block text-[10px] font-display font-bold text-zinc-950 uppercase tracking-widest mb-4">
@@ -342,6 +359,87 @@ const MODEL_FIELDS = [
 ]
 
 // Groq retires models regularly; let the user pick from what their key can use today
+// Optional mailbox-checking service for the email list (free tiers; user's own key)
+function EmailVerification({ form, onChange, status, clearing, onClearKey }) {
+  const [credits, setCredits] = useState(null)
+  const providers = status?.verify_providers || []
+  const chosen = providers.find((p) => p.name === form.verify_provider)
+  const savedProvider = status?.verify_provider
+  const hasKey = !!status?.has_verify_key
+
+  useEffect(() => {
+    if (!savedProvider || !hasKey) {
+      setCredits(null)
+      return
+    }
+    api.get('/emails/credits').then((res) => setCredits(res.data)).catch(() => setCredits(null))
+  }, [savedProvider, hasKey])
+
+  return (
+    <div className="pb-6 border-b border-zinc-200 space-y-4">
+      <div className={labelClass}>Email verification</div>
+      <p className="text-[11px] font-mono text-zinc-500 -mt-2">
+        Every email list is checked for typos, dead domains, disposable and previously bounced addresses — free and
+        automatic. Optionally, add a free account with one of these services to also check that each mailbox exists.
+      </p>
+      <div>
+        <label htmlFor="verify-provider" className="block text-xs text-zinc-700 mb-1">Mailbox check service</label>
+        <select id="verify-provider" name="verify_provider" value={form.verify_provider} onChange={onChange} className={inputClass}>
+          <option value="">None — built-in checks only</option>
+          {providers.map((p) => <option key={p.name} value={p.name}>{p.label}</option>)}
+        </select>
+        {chosen && (
+          <p className="text-[11px] text-zinc-500 mt-1">
+            Free plan sign-up:{' '}
+            <a href={chosen.signup} target="_blank" rel="noopener noreferrer" className="text-indigo-700 underline">{chosen.signup}</a>
+          </p>
+        )}
+      </div>
+      {form.verify_provider && (
+        <>
+          <div>
+            <label htmlFor="verify-key" className="flex items-center justify-between text-xs text-zinc-700 mb-1">
+              <span>{chosen?.label || 'Service'} API key</span>
+              {clearing ? (
+                <span className="text-red-700 font-mono">will be removed on save</span>
+              ) : hasKey ? (
+                <span className="flex items-center gap-2">
+                  <ConfiguredBadge hint={status?.verify_key_hint} />
+                  <button type="button" onClick={onClearKey} className="text-red-600 hover:underline font-mono">remove</button>
+                </span>
+              ) : null}
+            </label>
+            <input
+              id="verify-key"
+              type="password"
+              name="verify_api_key"
+              value={form.verify_api_key}
+              onChange={onChange}
+              autoComplete="off"
+              placeholder={hasKey ? 'Leave blank to keep the current key' : 'Paste your API key'}
+              className={inputClass}
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" name="verify_with_service" checked={form.verify_with_service} onChange={onChange} className="accent-indigo-700" />
+            Check mailboxes with this service when I paste a list
+          </label>
+          {credits && (credits.credits != null || credits.error) && (
+            <p className={`text-xs font-mono ${credits.error ? 'text-red-600' : 'text-zinc-600'}`}>
+              {credits.error ? `${credits.provider}: ${credits.error}` : `${credits.provider}: ${credits.credits} checks left`}
+            </p>
+          )}
+          <p className="text-[11px] text-zinc-500 bg-amber-50 border border-amber-200 px-3 py-2">
+            Your contacts' email addresses are sent to {chosen?.label || 'this service'} for checking. Only addresses that
+            pass the free checks are sent, and each result is remembered for 30 days so credits aren't used twice.
+            The check runs from the service's servers, so it can't affect your Gmail or IP reputation.
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
 function AiModels({ form, onChange, defaults, hasKey }) {
   const [available, setAvailable] = useState(null)
   const [error, setError] = useState('')

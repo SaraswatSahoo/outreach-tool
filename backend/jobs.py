@@ -18,7 +18,7 @@ from common import utc_now_iso
 from db import get_db
 from llm import NoModelAvailable
 
-RUNNING_STATUSES = ("generating", "sending")
+RUNNING_STATUSES = ("generating", "sending", "checking")
 
 
 def _sleep(seconds):

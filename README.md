@@ -24,6 +24,8 @@ A powerful, local-first personal email outreach tool that generates unique, huma
 - **Automatic Reply Detection**: Every 10 minutes the inbox monitor finds replies to your emails (matched by email thread, or by sender), classifies them with AI (interested / check back / no openings / rejection / interview) and records them. It also catches bounces and out-of-office replies. Statuses you set by hand are never overwritten.
 - **Follow-up Sequences**: Per campaign, set up to 3 automatic follow-ups (e.g. +4 days, +7 days). Each step is drafted for everyone who hasn't replied, threaded onto the original email, and either queued for your review or sent automatically. Any reply stops the sequence for that person.
 - **Scheduled Sending**: Schedule a campaign for later, restrict sending to working hours / weekdays, set a daily limit (with an optional warm-up ramp for new Gmail accounts), and stop a send at any time. Sends pause and resume automatically around those limits, and a send cut off by a backend restart picks up where it left off.
+- **Campaign Brief Builder**: Pick a template (summer internship, research position, referral…) or answer a few quick questions, and the AI writes the campaign goal and context from them and your profile — then preview a sample email before generating the batch. It only uses facts you give it; it won't invent availability or achievements.
+- **Email Checking Before Sending**: Every pasted list is checked automatically — typos (`gmial.com`), domains that don't exist or can't receive email, disposable addresses and addresses that bounced for you before are moved to a "Removed" column (one click restores or fixes them), so they never become failed sends. Optionally connect a free verification service to also check that each mailbox exists.
 - **CSV / Excel Import**: Import contacts (`.csv` or `.xlsx`) with company, role and personal notes; the AI uses them to personalise each email.
 - **Pipeline Board**: A Kanban view of every contact by reply status, with drag-and-drop status changes.
 - **Lightweight CRM**: Search contacts, see every email and reply per contact, check-back reminders, blocked domains, and re-engagement candidates.
@@ -83,6 +85,23 @@ Options: `--no-browser`, `--port 9000` (default `8765`), `--check` (start, verif
 | Cloned repo | `backend/` inside the repo (`config.json`, `outreach.db`, `uploads/`) |
 
 These files are never committed (they're in `.gitignore`). Credentials are stored **unencrypted** in `config.json` — keep it private.
+
+---
+
+## ✅ Email verification
+
+**Built-in (always on, free, no account):** format, common domain typos, whether the domain exists and can receive email (DNS only), disposable/throwaway domains, addresses that bounced for you before, and your blocked domains. Uncertain cases (e.g. a DNS hiccup, shared inboxes like `hr@`) are kept and marked *risky* — an address is only removed when the problem is certain.
+
+**Optional mailbox check:** to also confirm that a specific mailbox exists, pick a service in **Settings → Email verification** and paste your API key from its free plan:
+
+| Service | Free plan (approx.; check the provider) | Sign up |
+|---|---|---|
+| Reoon | ~100 credits at signup + ~20/day | [emailverifier.reoon.com](https://emailverifier.reoon.com/) |
+| Hunter | 50 credits/month (≈100 verifications) | [hunter.io](https://hunter.io/users/sign_up) |
+| ZeroBounce | ~100/month | [zerobounce.net](https://www.zerobounce.net/members/signup) |
+| Abstract API | ~100/month | [abstractapi.com](https://www.abstractapi.com/api/email-verification-validation-api) |
+
+Only addresses that pass the built-in checks are sent to the service, and each result is cached for 30 days, so free credits aren't spent twice. The check runs from the service's servers — the tool never contacts mail servers itself, so it can't harm your Gmail or IP reputation. Note that your contacts' addresses are shared with the service you choose. When free credits run out (or the key is wrong), addresses are kept and marked "mailbox not checked".
 
 ---
 

@@ -16,7 +16,8 @@ FRONTEND_DIST = os.path.join(ROOT, "frontend", "dist")
 if not os.path.isfile(os.path.join(FRONTEND_DIST, "index.html")):
     raise SystemExit("frontend/dist is missing — run `npm ci && npm run build` in frontend/ first.")
 
-datas = [(FRONTEND_DIST, "frontend_dist")]
+# The website, and backend data files (disposable email domains list) next to the backend modules
+datas = [(FRONTEND_DIST, "frontend_dist"), (os.path.join(BACKEND, "data"), "data")]
 binaries = []
 hiddenimports = []
 

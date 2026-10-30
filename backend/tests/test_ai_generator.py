@@ -147,3 +147,32 @@ def test_model_lists_put_configured_first_and_dedupe():
     assert llm.text_models(cfg) == ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"]
     assert llm.resume_models(cfg)[0] == llm.DEFAULT_RESUME_MODEL
     assert llm.text_models({}) == llm.DEFAULT_TEXT_MODELS
+
+
+def test_generate_brief_uses_answers_and_rejects_empty(monkeypatch):
+    seen = {}
+
+    def fake_json_chat(api_key, models, messages, temperature=0.1):
+        seen["prompt"] = messages[1]["content"]
+        seen["system"] = messages[0]["content"]
+        return {"goal": "  Ask founders for an ML internship.  ", "additional_context": "Available June"}
+
+    monkeypatch.setattr(llm, "json_chat", fake_json_chat)
+    brief = G.generate_brief(
+        {"name": "Sam", "skills": "python"},
+        {"projects": [{"title": "Coeur AI"}]},
+        {"purpose": "Internship", "field": "ML", "availability": "", "tone": "Friendly"},
+        "key",
+    )
+    assert brief == {"goal": "Ask founders for an ML internship.", "additional_context": "Available June"}
+    assert "Purpose: Internship" in seen["prompt"] and "Coeur AI" in seen["prompt"]
+    assert "Availability" not in seen["prompt"]  # empty answers aren't sent
+    assert "Never invent" in seen["system"]
+
+    monkeypatch.setattr(llm, "json_chat", lambda *a, **k: {"goal": "", "additional_context": ""})
+    with pytest.raises(ValueError):
+        G.generate_brief({}, {}, {"purpose": "Internship"}, "key")
+
+
+def test_email_prompt_forbids_invented_availability():
+    assert "Only mention availability" in G.SYSTEM_PROMPT

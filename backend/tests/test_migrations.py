@@ -6,6 +6,10 @@ import tempfile
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+import db  # noqa: E402
+
+ALL_VERSIONS = [version for version, _ in db.MIGRATIONS]
+
 # The schema as created by the very first version of the app (no reply tracking,
 # no cascades, no schema_version table)
 ORIGINAL_SCHEMA = """
@@ -41,7 +45,7 @@ def test_original_database_upgrades_with_data_and_cascades():
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    assert [r[0] for r in conn.execute("SELECT version FROM schema_version ORDER BY version")] == [1, 2]
+    assert [r[0] for r in conn.execute("SELECT version FROM schema_version ORDER BY version")] == ALL_VERSIONS
 
     r = conn.execute("SELECT * FROM recipients").fetchone()
     assert (r["email"], r["message_id"], r["follow_up_sent"], r["reply_status"]) == ("a@x.com", "<m@x>", 1, "no_reply")
@@ -64,7 +68,9 @@ def test_fresh_database_gets_latest_schema():
     path = os.path.join(tempfile.mkdtemp(), "new.db")
     _migrate(path)
     conn = sqlite3.connect(path)
-    assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 2
+    assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == ALL_VERSIONS[-1]
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"email_checks", "replies", "jobs"} <= tables
     cols = {row[1] for row in conn.execute("PRAGMA table_info(recipients)")}
     assert {"replied_at", "company", "role", "notes", "reply_status"} <= cols
     conn.close()

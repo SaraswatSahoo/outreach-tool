@@ -2,6 +2,7 @@
 
 from flask import Blueprint, jsonify, request
 
+import email_check
 import llm
 import scheduling
 from common import configured_groq_keys, json_error
@@ -11,7 +12,7 @@ from version import VERSION
 
 bp = Blueprint("settings", __name__, url_prefix="/api")
 
-SECRET_FIELDS = ("gmail_app_password",) + GROQ_KEY_FIELDS
+SECRET_FIELDS = ("gmail_app_password", "verify_api_key") + GROQ_KEY_FIELDS
 MODEL_FIELDS = ("ai_model", "ai_fallback_model", "ai_resume_model")
 SCHEDULE_FIELDS = (
     "send_window_enabled",
@@ -55,6 +56,13 @@ def get_settings():
                 "ai_fallback_model": llm.DEFAULT_TEXT_MODELS[1],
                 "ai_resume_model": llm.DEFAULT_RESUME_MODEL,
             },
+            "verify_provider": config.get("verify_provider") or "",
+            "verify_with_service": bool(config.get("verify_with_service", True)),
+            "has_verify_key": bool(config.get("verify_api_key")),
+            "verify_key_hint": _hint(config.get("verify_api_key", "")),
+            "verify_providers": [
+                {"name": p.name, "label": p.label, "signup": p.signup} for p in email_check.PROVIDERS.values()
+            ],
             "is_complete": is_settings_complete(config),
         }
     )
@@ -86,6 +94,14 @@ def save_settings():
         except (TypeError, ValueError):
             return json_error("send_delay_seconds must be a number")
         config["send_delay_seconds"] = max(SEND_DELAY_MIN, min(SEND_DELAY_MAX, delay))
+
+    if "verify_provider" in data:
+        provider = (data["verify_provider"] or "").strip()
+        if provider and provider not in email_check.PROVIDERS:
+            return json_error("Unknown verification service")
+        config["verify_provider"] = provider
+    if "verify_with_service" in data:
+        config["verify_with_service"] = bool(data["verify_with_service"])
 
     for field in MODEL_FIELDS:
         if field in data:

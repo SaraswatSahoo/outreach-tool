@@ -1,11 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
-import DuplicateWarning from '../components/DuplicateWarning'
-import GenerationProgress from '../components/GenerationProgress'
+import BriefBuilder from '../components/BriefBuilder'
 import CsvImport from '../components/CsvImport'
+import DuplicateWarning from '../components/DuplicateWarning'
+import { CheckSummary, RemovedColumn } from '../components/EmailCheckPanel'
+import GenerationProgress from '../components/GenerationProgress'
+import SampleEmailPreview from '../components/SampleEmailPreview'
 import usePoller from '../hooks/usePoller'
-import { useBlockedDomains } from '../context/BlockedDomainsContext'
 import { errorMessage, useUI } from '../context/UIContext'
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
@@ -38,11 +40,14 @@ function removeEmails(text, emails) {
     .join('\n')
 }
 
+const appendLine = (text, line) => (text.trim() ? `${text.replace(/\s+$/, '')}\n${line}` : line)
+const listKey = (emails) => emails.map((e) => e.toLowerCase()).sort().join(',')
+
 export default function NewCampaign() {
   const navigate = useNavigate()
   const poller = usePoller()
+  const checkPoller = usePoller()
   const { toast } = useUI()
-  const { isBlocked } = useBlockedDomains()
   const [form, setForm] = useState({
     name: '',
     email_list: '',
@@ -54,32 +59,146 @@ export default function NewCampaign() {
   const [campaignId, setCampaignId] = useState(null)
   const [error, setError] = useState('')
 
-  const [checked, setChecked] = useState(null) // { total, duplicates } from the last duplicate check
   const [pendingDuplicates, setPendingDuplicates] = useState([])
-  const [skippedCount, setSkippedCount] = useState(0)
-  const [csvRows, setCsvRows] = useState(null) // structured recipients from a CSV import
+  const [duplicateCount, setDuplicateCount] = useState(0)
+  const [csvRows, setCsvRows] = useState(null) // structured recipients from a CSV/Excel import
+
+  // Email checking
+  const [checking, setChecking] = useState(false)
+  const [checkProgress, setCheckProgress] = useState(null)
+  const [checkStats, setCheckStats] = useState(null)
+  const [removed, setRemoved] = useState([]) // {email, verdict, reason, suggestion, row?}
+  const [risky, setRisky] = useState([])
+  const [provider, setProvider] = useState(null)
+  const lastChecked = useRef('')
+  const restored = useRef(new Set()) // addresses the user put back: never auto-remove them again
+
+  useEffect(() => {
+    api.get('/settings')
+      .then(({ data }) => {
+        if (data.verify_provider && data.has_verify_key && data.verify_with_service) {
+          setProvider(data.verify_providers?.find((p) => p.name === data.verify_provider)?.label || null)
+        }
+      })
+      .catch(() => {})
+  }, [])
 
   const handleChange = (e) => {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }))
   }
 
   const currentEmails = csvRows ? csvRows.map((r) => r.email) : extractEmails(form.email_list)
-  const blockedInPaste = currentEmails.filter((e) => isBlocked(e))
 
   const checkDuplicates = async (emails) => {
-    setSkippedCount(0)
     if (emails.length === 0) {
-      setChecked(null)
       setPendingDuplicates([])
+      setDuplicateCount(0)
       return
     }
     try {
       const res = await api.post('/campaign/check-duplicates', { emails })
       const dups = res.data.duplicates || []
-      setChecked({ total: emails.length, duplicates: dups.length })
+      setDuplicateCount(dups.length)
       setPendingDuplicates(dups)
     } catch (err) {
       toast.error(errorMessage(err, 'Duplicate check failed'))
+    }
+  }
+
+  // Take invalid addresses out of the list (keeping them in the Removed column)
+  const applyResults = (results, rows) => {
+    const isRestored = (email) => restored.current.has(email.toLowerCase())
+    const bad = results.filter((r) => r.verdict === 'invalid' && !isRestored(r.email))
+    const badSet = new Set(bad.map((r) => r.email.toLowerCase()))
+    const keptResults = results.filter((r) => !badSet.has(r.email.toLowerCase()))
+
+    if (rows) {
+      const rowFor = new Map(rows.map((row) => [row.email.toLowerCase(), row]))
+      bad.forEach((entry) => { entry.row = rowFor.get(entry.email.toLowerCase()) })
+      setCsvRows(rows.filter((row) => !badSet.has(row.email.toLowerCase())))
+    } else if (bad.length) {
+      setForm((f) => ({ ...f, email_list: removeEmails(f.email_list, bad.map((r) => r.email)) }))
+    }
+    setRemoved((prev) => {
+      const fresh = bad.filter((entry) => !prev.some((p) => p.email.toLowerCase() === entry.email.toLowerCase()))
+      return [...fresh, ...prev]
+    })
+    setRisky(keptResults.filter((r) => r.verdict === 'risky' || isRestored(r.email)).map((r) =>
+      isRestored(r.email) && r.verdict === 'invalid' ? { ...r, verdict: 'risky', reason: `kept by you — ${r.reason}` } : r,
+    ))
+    const kept = keptResults.map((r) => r.email)
+    lastChecked.current = listKey(kept) // so the edited list isn't re-checked on the next blur
+    setCheckStats({
+      checked: results.length,
+      good: keptResults.filter((r) => r.verdict === 'valid').length,
+      risky: keptResults.filter((r) => r.verdict !== 'valid').length,
+      removed: bad.length,
+    })
+    checkDuplicates(kept)
+  }
+
+  const runCheck = async (emails, rows = null, { force = false } = {}) => {
+    if (emails.length === 0) {
+      setCheckStats(null)
+      setRisky([])
+      setPendingDuplicates([])
+      setDuplicateCount(0)
+      lastChecked.current = ''
+      return
+    }
+    const key = listKey(emails)
+    if (!force && key === lastChecked.current) return
+    lastChecked.current = key
+    setChecking(true)
+    setCheckProgress({ done: 0, total: emails.length })
+    try {
+      const { data } = await api.post('/emails/verify', { emails })
+      checkPoller.start(async () => {
+        const { data: job } = await api.get(`/emails/verify/${data.job_id}`)
+        setCheckProgress({ done: job.done, total: job.total })
+        if (job.status === 'checking') return false
+        setChecking(false)
+        if (job.status === 'complete') applyResults(job.results, rows)
+        else toast.error(job.error || 'Checking the emails was interrupted — try again')
+        return true
+      }, 800, () => {
+        setChecking(false)
+        lastChecked.current = ''
+        toast.error('Lost connection while checking emails')
+      })
+    } catch (err) {
+      setChecking(false)
+      lastChecked.current = ''
+      toast.error(errorMessage(err, 'Couldn\'t check the emails'))
+    }
+  }
+
+  const restore = (entry) => {
+    restored.current.add(entry.email.toLowerCase())
+    setRemoved((prev) => prev.filter((r) => r.email !== entry.email))
+    if (csvRows) {
+      setCsvRows((rows) => [...rows, entry.row || { email: entry.email }])
+    } else {
+      setForm((f) => ({ ...f, email_list: appendLine(f.email_list, entry.email) }))
+    }
+    setRisky((prev) => [...prev, { ...entry, verdict: 'risky', reason: `kept by you — ${entry.reason}` }])
+    lastChecked.current = listKey([...currentEmails, entry.email])
+  }
+
+  const applySuggestion = (entry) => {
+    const fixed = entry.suggestion
+    setRemoved((prev) => prev.filter((r) => r.email !== entry.email))
+    setRisky((prev) => prev.filter((r) => r.email !== entry.email))
+    const others = currentEmails.filter((e) => e.toLowerCase() !== entry.email.toLowerCase())
+    if (csvRows) {
+      const base = csvRows.filter((r) => r.email.toLowerCase() !== entry.email.toLowerCase())
+      const row = { ...(entry.row || csvRows.find((r) => r.email === entry.email) || {}), email: fixed }
+      setCsvRows([...base, row])
+      runCheck([...others, fixed], [...base, row], { force: true })
+    } else {
+      const text = appendLine(removeEmails(form.email_list, [entry.email]), fixed)
+      setForm((f) => ({ ...f, email_list: text }))
+      runCheck(extractEmails(text), null, { force: true })
     }
   }
 
@@ -88,18 +207,13 @@ export default function NewCampaign() {
     if (csvRows) setCsvRows((rows) => rows.filter((r) => !drop.has(r.email.toLowerCase())))
     else setForm((f) => ({ ...f, email_list: removeEmails(f.email_list, emails) }))
     setPendingDuplicates((prev) => prev.filter((d) => !drop.has(d.email.toLowerCase())))
-    setSkippedCount((n) => n + emails.length)
+    lastChecked.current = listKey(currentEmails.filter((e) => !drop.has(e.toLowerCase())))
   }
 
   const handleDecision = (email, action) => {
     if (action === 'skip') skip([email])
     else setPendingDuplicates((prev) => prev.filter((d) => d.email !== email))
   }
-
-  const parseSummary = checked
-    ? `✓ ${checked.total} valid emails parsed · ${checked.duplicates} already contacted ` +
-      `(${skippedCount} skipped, ${checked.duplicates - skippedCount} included) · ${checked.total - checked.duplicates} new`
-    : ''
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -158,8 +272,13 @@ export default function NewCampaign() {
     )
   }
 
+  const showRemovedColumn = checkStats || removed.length > 0
+  const firstRecipient = csvRows?.[0] || (currentEmails[0] ? { email: currentEmails[0] } : null)
+  const labelClass = 'block text-xs font-display font-bold text-zinc-950 uppercase tracking-widest mb-2'
+  const fieldClass = 'w-full border border-zinc-300 rounded-none px-4 py-3 text-sm leading-relaxed focus:ring-1 focus:ring-zinc-900 focus:border-zinc-900 outline-none placeholder-zinc-400 bg-zinc-50 focus:bg-white transition-colors'
+
   return (
-    <div id="new-campaign-page" className="max-w-2xl mx-auto pb-12">
+    <div id="new-campaign-page" className="max-w-4xl mx-auto pb-12">
       <div className="mb-8 pb-4 border-b border-zinc-200">
         <h1 className="text-3xl font-display font-bold text-zinc-950 tracking-tight">New Campaign</h1>
       </div>
@@ -170,12 +289,10 @@ export default function NewCampaign() {
         </div>
       ) : null}
 
-      <form onSubmit={handleSubmit} className="space-y-6">
+      <form onSubmit={handleSubmit} className="space-y-8">
         {/* Campaign Name */}
         <div>
-          <label htmlFor="campaign-name" className="block text-xs font-display font-bold text-zinc-950 uppercase tracking-widest mb-2">
-            Campaign Name *
-          </label>
+          <label htmlFor="campaign-name" className={labelClass}>Campaign Name *</label>
           <input
             id="campaign-name"
             type="text"
@@ -183,98 +300,104 @@ export default function NewCampaign() {
             value={form.name}
             onChange={handleChange}
             required
-            placeholder="e.g., Summer Internship - ML Companies June 2026"
+            placeholder="e.g., Summer Internship - ML Startups"
             className="w-full border border-zinc-300 rounded-none px-4 py-2.5 text-sm focus:ring-1 focus:ring-zinc-900 focus:border-zinc-900 outline-none placeholder-zinc-400 bg-zinc-50 focus:bg-white transition-colors"
           />
         </div>
 
         {/* Email List */}
         <div>
-          <label htmlFor="email-list" className="block text-xs font-display font-bold text-zinc-950 uppercase tracking-widest mb-2 flex items-center justify-between">
+          <label htmlFor="email-list" className={`${labelClass} flex items-center justify-between`}>
             <span>Email List *</span>
-            <span className="text-zinc-500 font-mono normal-case tracking-normal text-[10px] bg-zinc-100 px-2 py-0.5 border border-zinc-200">paste any format</span>
+            <span className="text-zinc-500 font-mono normal-case tracking-normal text-[10px] bg-zinc-100 px-2 py-0.5 border border-zinc-200">
+              checked automatically
+            </span>
           </label>
-          {csvRows ? (
-            <div className="border border-zinc-300 bg-white">
-              <div className="flex justify-between items-center px-4 py-2 border-b border-zinc-200 bg-zinc-50">
-                <span className="text-xs font-mono text-zinc-700">
-                  {csvRows.length} recipient{csvRows.length !== 1 ? 's' : ''} imported
-                </span>
-                <button
-                  type="button"
-                  onClick={() => { setCsvRows(null); setChecked(null); setPendingDuplicates([]) }}
-                  className="text-xs text-red-600 hover:underline"
-                >
-                  Clear import
-                </button>
-              </div>
-              <div className="max-h-56 overflow-auto">
-                <table className="w-full text-xs">
-                  <thead className="text-zinc-500 text-left">
-                    <tr>{['Email', 'Name', 'Company', 'Role', 'Notes'].map((h) => <th key={h} className="px-3 py-1.5 font-medium">{h}</th>)}</tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-100 font-mono">
-                    {csvRows.map((r) => (
-                      <tr key={r.email}>
-                        <td className="px-3 py-1.5">{r.email}</td>
-                        <td className="px-3 py-1.5">{r.name}</td>
-                        <td className="px-3 py-1.5">{r.company}</td>
-                        <td className="px-3 py-1.5">{r.role}</td>
-                        <td className="px-3 py-1.5 max-w-[12rem] truncate" title={r.notes}>{r.notes}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+
+          <div className={showRemovedColumn ? 'grid grid-cols-1 lg:grid-cols-3 gap-4' : ''}>
+            <div className={showRemovedColumn ? 'lg:col-span-2' : ''}>
+              {csvRows ? (
+                <div className="border border-zinc-300 bg-white">
+                  <div className="flex justify-between items-center px-4 py-2 border-b border-zinc-200 bg-zinc-50">
+                    <span className="text-xs font-mono text-zinc-700">
+                      {csvRows.length} recipient{csvRows.length !== 1 ? 's' : ''} imported
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => { setCsvRows(null); runCheck([]); setRemoved([]) }}
+                      className="text-xs text-red-600 hover:underline"
+                    >
+                      Clear import
+                    </button>
+                  </div>
+                  <div className="max-h-56 overflow-auto">
+                    <table className="w-full text-xs">
+                      <thead className="text-zinc-500 text-left">
+                        <tr>{['Email', 'Name', 'Company', 'Role', 'Notes'].map((h) => <th key={h} className="px-3 py-1.5 font-medium">{h}</th>)}</tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-100 font-mono">
+                        {csvRows.map((r) => (
+                          <tr key={r.email}>
+                            <td className="px-3 py-1.5">{r.email}</td>
+                            <td className="px-3 py-1.5">{r.name}</td>
+                            <td className="px-3 py-1.5">{r.company}</td>
+                            <td className="px-3 py-1.5">{r.role}</td>
+                            <td className="px-3 py-1.5 max-w-[12rem] truncate" title={r.notes}>{r.notes}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <textarea
+                  id="email-list"
+                  name="email_list"
+                  value={form.email_list}
+                  onChange={handleChange}
+                  onBlur={(e) => runCheck(extractEmails(e.target.value))}
+                  required
+                  rows={8}
+                  placeholder={"john@company.com\njane.doe@startup.io, mark@techcorp.com\nAlice <alice@acme.com>\nBob Smith - bob@smith.com"}
+                  className={`${fieldClass} font-mono`}
+                />
+              )}
             </div>
-          ) : (
-            <textarea
-              id="email-list"
-              name="email_list"
-              value={form.email_list}
-              onChange={handleChange}
-              onBlur={(e) => checkDuplicates(extractEmails(e.target.value))}
-              required
-              rows={6}
-              placeholder={"john@company.com\njane.doe@startup.io, mark@techcorp.com\nAlice <alice@acme.com>\nBob Smith - bob@smith.com"}
-              className="w-full border border-zinc-300 rounded-none px-4 py-3 text-sm font-mono leading-relaxed focus:ring-1 focus:ring-zinc-900 focus:border-zinc-900 outline-none placeholder-zinc-400 bg-zinc-50 focus:bg-white transition-colors"
-            />
-          )}
+            {showRemovedColumn && (
+              <RemovedColumn removed={removed} onRestore={restore} onUseSuggestion={applySuggestion} />
+            )}
+          </div>
 
           <div className="flex flex-wrap justify-between items-center gap-2 mt-2">
-             <p className="text-[11px] font-mono text-zinc-500">
-               {csvRows
-                 ? 'Company, role and notes are used to personalise each email.'
-                 : 'Supports: newline, comma, space-separated, Name <email>, Name - email — or import a CSV/Excel file with company/role/notes columns.'}
-             </p>
-             <button type="button" onClick={() => checkDuplicates(currentEmails)} className="text-[11px] font-mono font-medium text-indigo-700 hover:bg-indigo-50 px-2 py-1 rounded-none border border-indigo-200 transition-colors uppercase tracking-wider">
-               Check Duplicates
-             </button>
+            <p className="text-[11px] font-mono text-zinc-500">
+              {csvRows
+                ? 'Company, role and notes are used to personalise each email.'
+                : 'Paste in any format (one per line, commas, Name <email>) — or import a CSV/Excel file below.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => runCheck(currentEmails, csvRows, { force: true })}
+              disabled={checking || currentEmails.length === 0}
+              className="text-[11px] font-mono font-medium text-indigo-700 hover:bg-indigo-50 px-2 py-1 rounded-none border border-indigo-200 transition-colors uppercase tracking-wider disabled:opacity-50"
+            >
+              {checking ? 'Checking…' : 'Check emails'}
+            </button>
           </div>
 
           {!csvRows && (
             <div className="mt-2">
-              <CsvImport onImport={(rows) => { setCsvRows(rows); checkDuplicates(rows.map((r) => r.email)) }} />
+              <CsvImport onImport={(rows) => { setCsvRows(rows); runCheck(rows.map((r) => r.email), rows, { force: true }) }} />
             </div>
           )}
-          
-          {parseSummary ? (
-            <div className="mt-3 text-xs font-mono text-emerald-800 bg-zinc-50 px-4 py-2.5 rounded-none border border-zinc-200 border-l-2 border-l-emerald-500 flex items-center gap-2">
-               {parseSummary}
-            </div>
-          ) : null}
 
-          {blockedInPaste.length > 0 && (
-            <div className="text-xs font-mono text-red-800 bg-red-50 border border-red-200 rounded-none p-4 mt-3">
-              <span className="font-bold">⚠️ BLOCKED DOMAINS DETECTED</span>
-              <p className="mt-1 mb-2">The following emails are from blocked domains and will be skipped:</p>
-              <ul className="list-disc list-inside text-[11px]">
-                {blockedInPaste.map(e => (
-                  <li key={e}>{e}</li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <CheckSummary
+            checking={checking}
+            progress={checkProgress}
+            stats={checkStats && { ...checkStats, duplicates: duplicateCount }}
+            risky={risky}
+            onUseSuggestion={applySuggestion}
+            provider={provider}
+          />
 
           {pendingDuplicates.length > 0 && (
             <DuplicateWarning
@@ -286,48 +409,54 @@ export default function NewCampaign() {
           )}
         </div>
 
-        {/* Campaign Goal */}
-        <div>
-          <label htmlFor="campaign-goal" className="block text-xs font-display font-bold text-zinc-950 uppercase tracking-widest mb-2">
-            Campaign Goal / Description *
-          </label>
-          <textarea
-            id="campaign-goal"
-            name="goal"
-            value={form.goal}
-            onChange={handleChange}
-            required
-            rows={3}
-            placeholder="e.g., Send emails asking for a summer internship in machine learning or chemical engineering roles"
-            className="w-full border border-zinc-300 rounded-none px-4 py-3 text-sm leading-relaxed focus:ring-1 focus:ring-zinc-900 focus:border-zinc-900 outline-none placeholder-zinc-400 bg-zinc-50 focus:bg-white transition-colors"
+        {/* Brief */}
+        <div className="space-y-4">
+          <BriefBuilder
+            hasGoal={!!(form.goal.trim() || form.additional_context.trim())}
+            onApply={({ goal, additional_context }) => setForm((f) => ({ ...f, goal, additional_context }))}
           />
-        </div>
 
-        {/* Additional Context */}
-        <div>
-          <label htmlFor="additional-context" className="block text-xs font-display font-bold text-zinc-950 uppercase tracking-widest mb-2 flex items-center justify-between">
-            <span>Additional Context</span>
-            <span className="text-zinc-400 font-mono normal-case tracking-normal text-[10px]">optional</span>
-          </label>
-          <textarea
-            id="additional-context"
-            name="additional_context"
-            value={form.additional_context}
-            onChange={handleChange}
-            rows={2}
-            placeholder="e.g., Mention that I'm available from May to July 2026"
-            className="w-full border border-zinc-300 rounded-none px-4 py-3 text-sm leading-relaxed focus:ring-1 focus:ring-zinc-900 focus:border-zinc-900 outline-none placeholder-zinc-400 bg-zinc-50 focus:bg-white transition-colors"
-          />
+          <div>
+            <label htmlFor="campaign-goal" className={labelClass}>Campaign Goal / Description *</label>
+            <textarea
+              id="campaign-goal"
+              name="goal"
+              value={form.goal}
+              onChange={handleChange}
+              required
+              rows={3}
+              placeholder="What you're asking for, from whom, and when — or use “Help me write this” above."
+              className={fieldClass}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="additional-context" className={`${labelClass} flex items-center justify-between`}>
+              <span>Additional Context</span>
+              <span className="text-zinc-400 font-mono normal-case tracking-normal text-[10px]">optional</span>
+            </label>
+            <textarea
+              id="additional-context"
+              name="additional_context"
+              value={form.additional_context}
+              onChange={handleChange}
+              rows={3}
+              placeholder="Facts the emails can use: availability, a project to highlight, links, tone. The AI won't invent these."
+              className={fieldClass}
+            />
+          </div>
+
+          <SampleEmailPreview goal={form.goal} additionalContext={form.additional_context} recipient={firstRecipient} />
         </div>
 
         <div className="pt-4 border-t border-zinc-200">
           <button
             id="create-campaign-btn"
             type="submit"
-            disabled={loading}
+            disabled={loading || checking}
             className="w-full py-3.5 bg-indigo-700 text-white font-display font-bold uppercase tracking-widest text-sm rounded-none hover:bg-indigo-800 disabled:opacity-50 disabled:bg-zinc-400 transition-colors"
           >
-            {loading ? 'Starting...' : 'Create Campaign & Generate'}
+            {loading ? 'Starting...' : checking ? 'Checking emails…' : 'Create Campaign & Generate'}
           </button>
         </div>
       </form>

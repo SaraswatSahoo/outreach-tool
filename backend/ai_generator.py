@@ -48,8 +48,53 @@ TONE:
 
 LENGTH: 120-170 words for the body (including greeting and sign-off). Shorter is better if the message is complete.
 
+FACTS — NEVER INVENT:
+- Only mention availability, start dates, hours per week, duration, location or relocation if they are stated in the CAMPAIGN GOAL or ADDITIONAL CONTEXT. If not stated, leave them out entirely.
+- Never invent achievements, numbers, companies, or projects that aren't in the student profile or resume highlights.
+
 OUTPUT FORMAT: Return ONLY a valid JSON object: {"subject": "...", "body": "..."}
 The body must include the greeting line and sign-off. No markdown, no extra text."""
+
+
+BRIEF_SYSTEM_PROMPT = """You help a student set up a cold-outreach email campaign. From their answers and profile,
+write the two fields the campaign tool needs:
+
+1. "goal": 1-3 sentences, written in the first person as an instruction to the email writer, stating what the
+   student is asking for (role/field, type of opportunity), who the recipients are, and the timeframe if given.
+2. "additional_context": short, specific sentences (one per line) with the extra facts the emails should use:
+   the project to highlight, availability, flexibility, links, tone. Empty string if nothing was given.
+
+RULES:
+- Use ONLY facts present in the answers or profile. Never invent dates, availability, hours, locations,
+  numbers, achievements or projects. If something wasn't given, leave it out.
+- Be concrete and concise; no fluff, no marketing language.
+- Return ONLY JSON: {"goal": "...", "additional_context": "..."}"""
+
+
+def generate_brief(profile, resume_parsed, answers, api_key, models=None):
+    """Turn the brief-builder answers into the campaign's goal and additional context."""
+    from llm import json_chat
+
+    projects = [p.get("title") for p in (resume_parsed or {}).get("projects", []) if p.get("title")]
+    lines = [f"- {key.replace('_', ' ').capitalize()}: {value}" for key, value in answers.items() if value]
+    user_prompt = f"""STUDENT PROFILE:
+- Name: {profile.get("name", "")}
+- College: {profile.get("college", "")}, {profile.get("branch", "")}, {profile.get("year", "")}
+- Skills: {profile.get("skills", "")}
+- Resume projects: {", ".join(projects) or "none listed"}
+
+THEIR ANSWERS:
+{chr(10).join(lines) or "- (none)"}"""
+    result = json_chat(
+        api_key,
+        models or DEFAULT_TEXT_MODELS,
+        [{"role": "system", "content": BRIEF_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
+        temperature=0.4,
+    )
+    goal = str(result.get("goal") or "").strip()
+    if not goal:
+        raise ValueError("The AI returned an empty goal — try again")
+    return {"goal": goal, "additional_context": str(result.get("additional_context") or "").strip()}
 
 
 def build_resume_highlights(resume_parsed: dict) -> str:
@@ -226,6 +271,7 @@ GENERAL RULES:
 - Never use "Dear Sir/Madam"
 - Use semi-formal tone throughout
 - Start with the exact greeting provided
+- Never invent availability, dates, hours, locations or achievements that aren't given below
 - End with: Best,\\n{first_name}
 - Return ONLY valid JSON: {{"subject": "Re: {original_subject}", "body": "..."}}"""
 

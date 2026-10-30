@@ -22,6 +22,10 @@ DEFAULT_CONFIG = {
     "ai_model": "",
     "ai_fallback_model": "",
     "ai_resume_model": "",
+    # Optional email verification service (see email_check.py): "" / reoon / hunter / zerobounce / abstract
+    "verify_provider": "",
+    "verify_api_key": "",
+    "verify_with_service": True,
     # Sending schedule (local time of the machine running the backend)
     "send_window_enabled": False,
     "send_window_start": 9,  # hour, inclusive

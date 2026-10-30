@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from flask import Blueprint, jsonify, request
 
 import jobs
-from ai_generator import generate_email
+from ai_generator import generate_brief, generate_email
 from common import (
     FOLLOWUP_INELIGIBLE_SQL,
     configured_groq_keys,
@@ -200,6 +200,69 @@ def _generate_for_recipient(config, campaign, recipient, api_key):
         fallback_keys=configured_groq_keys(config),
         models=text_models(config),
     )
+
+
+# Brief-builder answers the AI may use (anything else in the request is ignored)
+BRIEF_FIELDS = (
+    "purpose",
+    "field",
+    "timing",
+    "dates",
+    "work_mode",
+    "location",
+    "audience",
+    "project_to_highlight",
+    "availability",
+    "flexibility",
+    "links",
+    "tone",
+    "anything_else",
+)
+
+
+@bp.route("/campaign/brief", methods=["POST"])
+def write_brief():
+    """Write the campaign goal + additional context from a few quick answers and the profile."""
+    data = request.json or {}
+    answers = {k: str(data.get(k) or "").strip()[:500] for k in BRIEF_FIELDS}
+    if not answers["purpose"] and not answers["field"]:
+        return json_error("Tell me at least what you're looking for, or which field")
+    config = load_config()
+    try:
+        keys = get_groq_keys(config)
+        brief = generate_brief(
+            config.get("profile", {}),
+            config.get("resume_parsed", {}),
+            answers,
+            random.choice(keys),
+            models=text_models(config),
+        )
+    except Exception as e:
+        return json_error(str(e), 502 if not isinstance(e, ValueError) else 400)
+    return jsonify(brief)
+
+
+@bp.route("/campaign/sample-email", methods=["POST"])
+def sample_email():
+    """Write one email for a single recipient from the current brief. Nothing is saved or sent."""
+    data = request.json or {}
+    goal = (data.get("goal") or "").strip()
+    if not goal:
+        return json_error("Write the campaign goal first")
+    recipient = data.get("recipient") or {}
+    email = (recipient.get("email") or "").strip() or "someone@example-company.com"
+    config = load_config()
+    try:
+        keys = get_groq_keys(config)
+        result = _generate_for_recipient(
+            config,
+            {"goal": goal, "additional_context": (data.get("additional_context") or "").strip()},
+            {"email": email, **{f: (recipient.get(f) or None) for f in RECIPIENT_FIELDS}},
+            random.choice(keys),
+        )
+    except Exception as e:
+        return json_error(str(e), 400 if isinstance(e, ValueError) else 502)
+    return jsonify({"email": email, "subject": result["subject"], "body": result["body"]})
 
 
 @bp.route("/campaign/<int:campaign_id>/generate", methods=["POST"])

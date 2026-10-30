@@ -16,9 +16,13 @@ import scheduling
 from ai_generator import RateLimitExhausted
 from common import utc_now_iso
 from db import get_db
+from email_sender import GmailUnreachable
 from llm import NoModelAvailable
 
 RUNNING_STATUSES = ("generating", "sending", "checking")
+
+# Stop a send after this many emails in a row couldn't reach Gmail at all
+MAX_CONSECUTIVE_UNREACHABLE = 3
 
 
 def _sleep(seconds):
@@ -264,8 +268,12 @@ def run_send_job(job, items, email_key, send_one, on_sent, on_failed, delay, con
     - should_skip(conn, item) -> reason|None is re-checked right before each send.
     - A Gmail authentication failure aborts the whole job (it would fail for
       every recipient), leaving the remaining items untouched as drafts.
+    - If Gmail can't be reached (network/firewall/antivirus), the email is left
+      as a draft ("not_sent"), not marked failed; after
+      MAX_CONSECUTIVE_UNREACHABLE in a row the job stops with a clear message.
     """
     progress = job.data
+    unreachable_streak = 0
     try:
         for i, item in enumerate(items):
             if not _wait_for_send_slot(job, config):
@@ -287,7 +295,20 @@ def run_send_job(job, items, email_key, send_one, on_sent, on_failed, delay, con
                     continue
                 message_id = send_one(item)
                 on_sent(conn, item, message_id)
+                unreachable_streak = 0
                 progress["log"].append({"email": email, "status": "sent", "time": utc_now_iso()})
+            except GmailUnreachable as e:
+                # Nothing was transmitted: keep it as a draft so it can be sent later
+                unreachable_streak += 1
+                progress["log"].append({"email": email, "status": "not_sent", "error": str(e), "time": utc_now_iso()})
+                if unreachable_streak >= MAX_CONSECUTIVE_UNREACHABLE:
+                    progress["status"] = "error"
+                    progress["stop_reason"] = (
+                        f"Stopped: couldn't reach Gmail {unreachable_streak} times in a row. {e} "
+                        "Unsent emails are still drafts — check your connection (Settings → Test Gmail connection), "
+                        "then send again."
+                    )
+                    return
             except smtplib.SMTPAuthenticationError as e:
                 progress["log"].append(
                     {
@@ -298,6 +319,7 @@ def run_send_job(job, items, email_key, send_one, on_sent, on_failed, delay, con
                     }
                 )
                 progress["status"] = "error"
+                progress["stop_reason"] = "Stopped: Gmail rejected the login. Check your App Password in Settings."
                 return
             except Exception as e:
                 on_failed(conn, item, str(e))

@@ -39,6 +39,7 @@ export default function SendProgress({ isFollowUp = false }) {
   const sentCount = progress.log.filter((l) => l.status === 'sent').length
   const failedCount = progress.log.filter((l) => l.status === 'failed').length
   const skippedCount = progress.log.filter((l) => l.status === 'skipped').length
+  const notSentCount = progress.log.filter((l) => l.status === 'not_sent').length
 
   const handleStop = async () => {
     const ok = await confirm({
@@ -124,6 +125,13 @@ export default function SendProgress({ isFollowUp = false }) {
           </button>
         ) : null}
 
+        {progress.status === 'complete' && notSentCount > 0 ? (
+          <p className="mt-6 text-sm font-mono text-amber-800 bg-amber-50 border border-amber-200 p-3">
+            {notSentCount} email{notSentCount !== 1 ? 's' : ''} couldn't reach Gmail and {notSentCount !== 1 ? 'are' : 'is'} still
+            a draft. Check your connection in Settings → Test Gmail connection, then send the campaign's drafts again.
+          </p>
+        ) : null}
+
         {progress.status === 'stopped' ? (
           <p className="mt-6 text-sm font-mono text-zinc-700 bg-zinc-50 border border-zinc-200 p-3">
             Sending was stopped. Emails that weren't sent are still drafts.
@@ -138,19 +146,24 @@ export default function SendProgress({ isFollowUp = false }) {
 
         {progress.status === 'error' ? (
           <p className="mt-6 text-sm font-mono text-red-700 bg-red-50 border border-red-200 p-3">
-            Sending stopped early — see the log below. Unsent emails are still drafts and can be sent again.
+            {progress.stop_reason || 'Sending stopped early — see the log below. Unsent emails are still drafts and can be sent again.'}
           </p>
         ) : null}
 
         {progress.status !== 'sending' ? (
           <div className="mt-6">
-            <div className="flex gap-4 font-mono text-sm mb-6 border border-zinc-200 p-4 bg-zinc-50">
+            <div className="flex flex-wrap gap-4 font-mono text-sm mb-6 border border-zinc-200 p-4 bg-zinc-50">
               <span className="text-emerald-700 font-bold flex items-center gap-2">
                 <span className="bg-emerald-100 text-emerald-800 px-1.5 py-0.5">✓</span> {sentCount} SENT
               </span>
               {failedCount > 0 ? (
                 <span className="text-red-700 font-bold flex items-center gap-2">
                   <span className="bg-red-100 text-red-800 px-1.5 py-0.5">✗</span> {failedCount} FAILED
+                </span>
+              ) : null}
+              {notSentCount > 0 ? (
+                <span className="text-amber-700 font-bold flex items-center gap-2" title="Gmail couldn't be reached — these are still drafts">
+                  <span className="bg-amber-100 text-amber-800 px-1.5 py-0.5">⏸</span> {notSentCount} NOT SENT (STILL DRAFTS)
                 </span>
               ) : null}
               {skippedCount > 0 ? (
@@ -183,14 +196,21 @@ export default function SendProgress({ isFollowUp = false }) {
               <div key={i} className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-zinc-50 transition-colors">
                 <div className="flex items-center gap-3">
                   <span className={`w-1.5 h-1.5 rounded-none ${
-                    entry.status === 'sent' ? 'bg-emerald-500' : entry.status === 'skipped' ? 'bg-zinc-400' : 'bg-red-500'
+                    entry.status === 'sent' ? 'bg-emerald-500'
+                      : entry.status === 'skipped' ? 'bg-zinc-400'
+                        : entry.status === 'not_sent' ? 'bg-amber-500' : 'bg-red-500'
                   }`} />
                   <span className="text-zinc-900 font-bold">{entry.email}</span>
                 </div>
                 <div className={`text-[10px] uppercase tracking-widest ${
-                  entry.status === 'sent' ? 'text-emerald-600' : entry.status === 'skipped' ? 'text-zinc-500' : 'text-red-600'
+                  entry.status === 'sent' ? 'text-emerald-600'
+                    : entry.status === 'skipped' ? 'text-zinc-500'
+                      : entry.status === 'not_sent' ? 'text-amber-700' : 'text-red-600'
                 }`}>
-                  {entry.status === 'sent' ? 'SENT' : entry.status === 'skipped' ? `SKIPPED: ${entry.error}` : `FAILED: ${entry.error || 'UNKNOWN ERROR'}`}
+                  {entry.status === 'sent' ? 'SENT'
+                    : entry.status === 'skipped' ? `SKIPPED: ${entry.error}`
+                      : entry.status === 'not_sent' ? `NOT SENT (STILL A DRAFT): ${entry.error}`
+                        : `FAILED: ${entry.error || 'UNKNOWN ERROR'}`}
                 </div>
               </div>
             ))}

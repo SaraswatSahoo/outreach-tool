@@ -178,6 +178,7 @@ export default function Settings() {
             </a>{' '}
             → 2-Step Verification → App Passwords.
           </p>
+          <GmailConnectionTest savedAddress={status?.gmail_address} hasPassword={!!status?.has_gmail_password} />
         </div>
 
         {/* Groq API Keys */}
@@ -359,6 +360,55 @@ const MODEL_FIELDS = [
 ]
 
 // Groq retires models regularly; let the user pick from what their key can use today
+// Checks that this computer can reach Gmail's mail server (ports 587 and 465) and log in
+function GmailConnectionTest({ savedAddress, hasPassword }) {
+  const [testing, setTesting] = useState(false)
+  const [result, setResult] = useState(null)
+  const { toast } = useUI()
+
+  const run = async () => {
+    setTesting(true)
+    setResult(null)
+    try {
+      const { data } = await api.post('/settings/test-gmail')
+      setResult(data)
+    } catch (err) {
+      toast.error(errorMessage(err, 'Connection test failed'))
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={run}
+        disabled={testing}
+        className="px-3 py-1.5 border border-zinc-300 bg-white text-xs font-mono uppercase tracking-wider hover:bg-zinc-50 disabled:opacity-50"
+      >
+        {testing ? 'Testing… (up to a minute on a slow network)' : 'Test Gmail connection'}
+      </button>
+      {!savedAddress || !hasPassword ? (
+        <span className="ml-2 text-[11px] text-zinc-500">Save your Gmail address and App Password first to test the login too.</span>
+      ) : null}
+      {result && (
+        <div className={`mt-2 border px-3 py-2 text-xs ${result.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+          <div className="font-medium mb-1">{result.summary}</div>
+          <ul className="font-mono space-y-0.5">
+            {result.results.map((r) => (
+              <li key={r.port}>
+                {r.logged_in || r.connected ? '✓' : '✗'} Port {r.port}: {r.message}
+                {r.seconds != null ? ` (${r.seconds}s` + (r.attempts > 1 ? `, attempt ${r.attempts})` : ')') : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Optional mailbox-checking service for the email list (free tiers; user's own key)
 function EmailVerification({ form, onChange, status, clearing, onClearKey }) {
   const [credits, setCredits] = useState(null)

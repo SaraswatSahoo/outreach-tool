@@ -105,6 +105,14 @@ Only addresses that pass the built-in checks are sent to the service, and each r
 
 ---
 
+## 🩺 Troubleshooting
+
+**Emails show "NOT SENT (still a draft)" or "Couldn't reach Gmail's mail server"** — your computer couldn't connect to `smtp.gmail.com` at all, so nothing was sent and those emails are still drafts. The tool already retries each email several times and falls back from port 587 to 465; if Gmail still can't be reached 3 emails in a row, sending stops. Usual causes: college/office/public Wi-Fi blocking email ports, an antivirus "email/mail shield" (Avast, AVG, Kaspersky, McAfee, ESET, Bitdefender), a firewall, or a VPN. Use **Settings → Test Gmail connection** to check, or on Windows run `Test-NetConnection smtp.gmail.com -Port 587` in PowerShell. Fix the connection (or try another network, e.g. a phone hotspot), then send the campaign's drafts again. Emails marked **failed** by older versions can be put back with **Retry failed** on the campaign page.
+
+**"Gmail rejected the login"** — re-create the App Password (Google Account → Security → 2-Step Verification → App passwords) and save it in Settings.
+
+---
+
 ## ⚙️ Configuration
 
 No manual file editing is required. All configuration is handled through the application UI:

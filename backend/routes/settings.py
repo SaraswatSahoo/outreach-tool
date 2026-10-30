@@ -3,6 +3,7 @@
 from flask import Blueprint, jsonify, request
 
 import email_check
+import email_sender
 import llm
 import scheduling
 from common import configured_groq_keys, json_error
@@ -161,3 +162,30 @@ def available_models():
 def health():
     """Lets the launcher tell 'this tool is already running here' from 'some other app owns the port'."""
     return jsonify({"app": "outreach-tool", "version": VERSION})
+
+
+@bp.route("/settings/test-gmail", methods=["POST"])
+def test_gmail():
+    """Try to connect (and log in) to Gmail on ports 587 and 465, and explain the outcome."""
+    config = load_config()
+    address = (config.get("gmail_address") or "").strip()
+    password = config.get("gmail_app_password") or ""
+    results = email_sender.test_gmail_connection(address, password)
+
+    logged_in = [r for r in results if r["logged_in"]]
+    connected = [r for r in results if r["connected"]]
+    slow = [r for r in connected if (r["seconds"] or 0) > 5 or r["attempts"] > 1]
+    if logged_in:
+        summary = "Gmail is reachable and your login works — you can send."
+        if slow:
+            summary += " The connection is slow or unstable, so sends may take longer; retries happen automatically."
+    elif any("rejected the login" in r["message"] for r in results):
+        summary = "Gmail is reachable, but it rejected your login. Re-create the App Password and save it again."
+    elif connected:
+        summary = "Gmail is reachable. Save your Gmail address and App Password to test the login."
+    else:
+        summary = (
+            "Can't reach Gmail on either port. Your network, firewall, VPN or antivirus is blocking outgoing email. "
+            "Try another network (e.g. a phone hotspot), or turn off your antivirus's email/mail shield, then test again."
+        )
+    return jsonify({"ok": bool(logged_in), "summary": summary, "results": results})

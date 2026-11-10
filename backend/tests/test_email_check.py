@@ -193,24 +193,7 @@ def test_verify_settings_and_credits(client, monkeypatch):
     assert client.get("/api/emails/credits").get_json() == {"provider": None, "credits": None}
 
 
-def test_brief_and_sample_endpoints(client, monkeypatch, fake_ai):
-    import routes.campaigns as rc
-
-    seen = {}
-
-    def fake_brief(profile, resume_parsed, answers, api_key, models=None):
-        seen["answers"] = answers
-        return {
-            "goal": f"Ask for a {answers['field']} {answers['purpose']}",
-            "additional_context": "Available May-July",
-        }
-
-    monkeypatch.setattr(rc, "generate_brief", fake_brief)
-    res = client.post("/api/campaign/brief", json={"purpose": "internship", "field": "ML", "evil": "ignored"})
-    assert res.get_json() == {"goal": "Ask for a ML internship", "additional_context": "Available May-July"}
-    assert "evil" not in seen["answers"]
-    assert client.post("/api/campaign/brief", json={}).status_code == 400
-
+def test_sample_endpoint(client, fake_ai):
     sample = client.post(
         "/api/campaign/sample-email",
         json={"goal": "Ask for an ML internship", "recipient": {"email": "jane@acme.com", "company": "Acme"}},

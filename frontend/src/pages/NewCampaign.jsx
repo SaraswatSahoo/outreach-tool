@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
-import BriefBuilder from '../components/BriefBuilder'
 import CsvImport from '../components/CsvImport'
 import DuplicateWarning from '../components/DuplicateWarning'
 import { CheckSummary, RemovedColumn } from '../components/EmailCheckPanel'
 import GenerationProgress from '../components/GenerationProgress'
 import SampleEmailPreview from '../components/SampleEmailPreview'
+import TemplatePicker from '../components/TemplatePicker'
 import usePoller from '../hooks/usePoller'
 import { errorMessage, useUI } from '../context/UIContext'
 
@@ -40,6 +40,20 @@ function removeEmails(text, emails) {
     .join('\n')
 }
 
+// Recipients for the template preview: "Name <email>" and "Name - email" keep the name
+function recipientsFromText(text) {
+  const seen = new Set()
+  const result = []
+  for (const line of text.split(/[\n,]+/)) {
+    const m = line.match(EMAIL_RE)
+    if (!m || seen.has(m[0].toLowerCase())) continue
+    seen.add(m[0].toLowerCase())
+    const name = line.slice(0, m.index).replace(/[<\s-]+$/, '').trim()
+    result.push({ email: m[0], name: EMAIL_RE.test(name) ? '' : name })
+  }
+  return result
+}
+
 const appendLine = (text, line) => (text.trim() ? `${text.replace(/\s+$/, '')}\n${line}` : line)
 const listKey = (emails) => emails.map((e) => e.toLowerCase()).sort().join(',')
 
@@ -54,6 +68,9 @@ export default function NewCampaign() {
     goal: '',
     additional_context: '',
   })
+  const [mode, setMode] = useState('template') // 'template': fixed email, 'ai': written per recipient by the AI
+  const [template, setTemplate] = useState({ id: '', subject: '', body: '', goal: '' })
+  const [companies, setCompanies] = useState({}) // domain -> company name typed by the user
   const [loading, setLoading] = useState(false)
   const [generationProgress, setGenerationProgress] = useState(null)
   const [campaignId, setCampaignId] = useState(null)
@@ -222,7 +239,17 @@ export default function NewCampaign() {
 
     let createdId = null
     try {
-      const payload = csvRows ? { ...form, email_list: '', recipients: csvRows } : form
+      const emailPart = csvRows ? { email_list: '', recipients: csvRows } : { email_list: form.email_list }
+      const payload = mode === 'template'
+        ? {
+            name: form.name,
+            ...emailPart,
+            goal: template.goal,
+            template_subject: template.subject,
+            template_body: template.body,
+            company_overrides: companies,
+          }
+        : { ...form, ...emailPart }
       const createRes = await api.post('/campaign/new', payload)
       const { campaign_id, recipients_count, skipped_blocked } = createRes.data
       createdId = campaign_id
@@ -409,44 +436,67 @@ export default function NewCampaign() {
           )}
         </div>
 
-        {/* Brief */}
+        {/* Email content */}
         <div className="space-y-4">
-          <BriefBuilder
-            hasGoal={!!(form.goal.trim() || form.additional_context.trim())}
-            onApply={({ goal, additional_context }) => setForm((f) => ({ ...f, goal, additional_context }))}
-          />
-
-          <div>
-            <label htmlFor="campaign-goal" className={labelClass}>Campaign Goal / Description *</label>
-            <textarea
-              id="campaign-goal"
-              name="goal"
-              value={form.goal}
-              onChange={handleChange}
-              required
-              rows={3}
-              placeholder="What you're asking for, from whom, and when — or use “Help me write this” above."
-              className={fieldClass}
-            />
+          <div className="flex border border-zinc-300 w-fit text-xs font-display font-bold uppercase tracking-widest">
+            {[['template', 'Fixed template'], ['ai', 'AI-written']].map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setMode(key)}
+                className={`px-4 py-2 transition-colors ${mode === key ? 'bg-zinc-900 text-white' : 'bg-white text-zinc-600 hover:bg-zinc-100'}`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
 
-          <div>
-            <label htmlFor="additional-context" className={`${labelClass} flex items-center justify-between`}>
-              <span>Additional Context</span>
-              <span className="text-zinc-400 font-mono normal-case tracking-normal text-[10px]">optional</span>
-            </label>
-            <textarea
-              id="additional-context"
-              name="additional_context"
-              value={form.additional_context}
-              onChange={handleChange}
-              rows={3}
-              placeholder="Facts the emails can use: availability, a project to highlight, links, tone. The AI won't invent these."
-              className={fieldClass}
+          {mode === 'template' ? (
+            <TemplatePicker
+              value={template}
+              onChange={setTemplate}
+              recipients={csvRows || recipientsFromText(form.email_list)}
+              companies={companies}
+              onCompaniesChange={setCompanies}
             />
-          </div>
+          ) : (
+            <>
+              <p className="text-[11px] font-mono text-zinc-500">
+                The AI writes a different email for each recipient from your goal, profile and resume.
+              </p>
+              <div>
+                <label htmlFor="campaign-goal" className={labelClass}>Campaign Goal / Description *</label>
+                <textarea
+                  id="campaign-goal"
+                  name="goal"
+                  value={form.goal}
+                  onChange={handleChange}
+                  required
+                  rows={3}
+                  placeholder="What you're asking for, from whom, and when."
+                  className={fieldClass}
+                />
+              </div>
 
-          <SampleEmailPreview goal={form.goal} additionalContext={form.additional_context} recipient={firstRecipient} />
+              <div>
+                <label htmlFor="additional-context" className={`${labelClass} flex items-center justify-between`}>
+                  <span>Additional Context</span>
+                  <span className="text-zinc-400 font-mono normal-case tracking-normal text-[10px]">optional</span>
+                </label>
+                <textarea
+                  id="additional-context"
+                  name="additional_context"
+                  value={form.additional_context}
+                  onChange={handleChange}
+                  rows={3}
+                  placeholder="Facts the emails can use: availability, a project to highlight, links, tone. The AI won't invent these."
+                  className={fieldClass}
+                />
+              </div>
+
+              <SampleEmailPreview goal={form.goal} additionalContext={form.additional_context} recipient={firstRecipient} />
+            </>
+          )}
         </div>
 
         <div className="pt-4 border-t border-zinc-200">
@@ -456,7 +506,7 @@ export default function NewCampaign() {
             disabled={loading || checking}
             className="w-full py-3.5 bg-indigo-700 text-white font-display font-bold uppercase tracking-widest text-sm rounded-none hover:bg-indigo-800 disabled:opacity-50 disabled:bg-zinc-400 transition-colors"
           >
-            {loading ? 'Starting...' : checking ? 'Checking emails…' : 'Create Campaign & Generate'}
+            {loading ? 'Starting...' : checking ? 'Checking emails…' : mode === 'template' ? 'Create Campaign & Fill Emails' : 'Create Campaign & Generate'}
           </button>
         </div>
       </form>

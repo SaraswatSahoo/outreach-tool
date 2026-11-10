@@ -318,11 +318,17 @@ def _migration_3_email_checks(conn):
     conn.commit()
 
 
+def _migration_4_campaign_templates(conn):
+    """Fixed-template campaigns: emails are filled from this subject/body instead of written by the AI."""
+    _add_missing_columns(conn, "campaigns", [("template_subject", "TEXT"), ("template_body", "TEXT")])
+
+
 # (version, migration). Append new migrations; never edit or reorder old ones.
 MIGRATIONS = [
     (1, _migration_1_baseline),
     (2, _migration_2_cascading_deletes),
     (3, _migration_3_email_checks),
+    (4, _migration_4_campaign_templates),
 ]
 
 

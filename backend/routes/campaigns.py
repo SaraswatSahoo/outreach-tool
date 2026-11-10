@@ -8,8 +8,9 @@ from datetime import UTC, datetime
 
 from flask import Blueprint, jsonify, request
 
+import email_templates
 import jobs
-from ai_generator import generate_brief, generate_email
+from ai_generator import generate_email
 from common import (
     FOLLOWUP_INELIGIBLE_SQL,
     configured_groq_keys,
@@ -25,7 +26,7 @@ from db import execute_db, get_db, query_db
 from followup_service import campaign_sequence
 from llm import text_models
 from sending import SendError, start_campaign_send
-from utils import EMAIL_REGEX, parse_email_list
+from utils import EMAIL_REGEX, parse_email_list, resolve_company_name
 
 bp = Blueprint("campaigns", __name__, url_prefix="/api")
 
@@ -112,10 +113,21 @@ def create_campaign():
     email_list_raw = (data.get("email_list") or "").strip()
     rows = data.get("recipients")  # structured rows, e.g. from a CSV import
     additional_context = (data.get("additional_context") or "").strip()
+    template_subject = (data.get("template_subject") or "").strip()
+    template_body = (data.get("template_body") or "").strip()
+    use_template = bool(template_subject or template_body)
 
     if not name:
         return json_error("Campaign name is required")
-    if not goal:
+    if use_template:
+        if not template_subject or not template_body:
+            return json_error("The template needs both a subject and a body")
+        unknown = email_templates.unknown_placeholders(template_subject, template_body)
+        if unknown:
+            return json_error("Unknown placeholder(s) in the template: " + ", ".join(f"{{{u}}}" for u in unknown))
+        # Follow-ups are still AI-written, and they use the goal to know what was asked for
+        goal = goal or "Cold outreach email asking about opportunities at the company."
+    elif not goal:
         return json_error("Campaign goal is required")
     if not email_list_raw and not rows:
         return json_error("Email list is required")
@@ -127,6 +139,14 @@ def create_campaign():
     if not parsed:
         return json_error("No valid emails found in the list")
 
+    # Company names the user typed per domain (only used where a row has no company of its own)
+    overrides = data.get("company_overrides") or {}
+    if isinstance(overrides, dict):
+        overrides = {str(d).lower().strip(): str(c).strip()[:200] for d, c in overrides.items() if str(c).strip()}
+        for e in parsed:
+            if not e.get("company"):
+                e["company"] = overrides.get(e["email"].split("@")[-1].lower()) or e.get("company")
+
     # Blocked domains are dropped up front so no AI calls are wasted on them
     blocked = _blocked_domains()
     skipped_blocked = [e["email"] for e in parsed if e["email"].split("@")[-1].lower() in blocked]
@@ -135,8 +155,9 @@ def create_campaign():
         return json_error("Every email in the list is from a blocked domain")
 
     campaign_id = execute_db(
-        "INSERT INTO campaigns (name, goal, additional_context) VALUES (?, ?, ?)",
-        (name, goal, additional_context or None),
+        "INSERT INTO campaigns (name, goal, additional_context, template_subject, template_body) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (name, goal, additional_context or None, template_subject or None, template_body or None),
     )
 
     conn = get_db()
@@ -190,6 +211,10 @@ def delete_campaign(campaign_id):
 
 
 def _generate_for_recipient(config, campaign, recipient, api_key):
+    if campaign.get("template_subject"):
+        return email_templates.fill(
+            campaign["template_subject"], campaign["template_body"], recipient, config.get("profile", {})
+        )
     return generate_email(
         profile=config.get("profile", {}),
         recipient={k: recipient.get(k) for k in ("email",) + RECIPIENT_FIELDS},
@@ -202,44 +227,34 @@ def _generate_for_recipient(config, campaign, recipient, api_key):
     )
 
 
-# Brief-builder answers the AI may use (anything else in the request is ignored)
-BRIEF_FIELDS = (
-    "purpose",
-    "field",
-    "timing",
-    "dates",
-    "work_mode",
-    "location",
-    "audience",
-    "project_to_highlight",
-    "availability",
-    "flexibility",
-    "links",
-    "tone",
-    "anything_else",
-)
+# ─── Fixed templates ──────────────────────────────────────────────────────────
 
 
-@bp.route("/campaign/brief", methods=["POST"])
-def write_brief():
-    """Write the campaign goal + additional context from a few quick answers and the profile."""
+@bp.route("/templates", methods=["GET"])
+def list_templates():
+    return jsonify({"templates": email_templates.TEMPLATES, "placeholders": email_templates.PLACEHOLDERS})
+
+
+@bp.route("/templates/preview", methods=["POST"])
+def preview_template():
+    """Fill a template for one recipient with the profile. Nothing is saved or sent."""
     data = request.json or {}
-    answers = {k: str(data.get(k) or "").strip()[:500] for k in BRIEF_FIELDS}
-    if not answers["purpose"] and not answers["field"]:
-        return json_error("Tell me at least what you're looking for, or which field")
-    config = load_config()
-    try:
-        keys = get_groq_keys(config)
-        brief = generate_brief(
-            config.get("profile", {}),
-            config.get("resume_parsed", {}),
-            answers,
-            random.choice(keys),
-            models=text_models(config),
-        )
-    except Exception as e:
-        return json_error(str(e), 502 if not isinstance(e, ValueError) else 400)
-    return jsonify(brief)
+    recipient = data.get("recipient") or {}
+    recipient = {
+        "email": (recipient.get("email") or "").strip() or "someone@example-company.com",
+        **{f: (recipient.get(f) or None) for f in RECIPIENT_FIELDS},
+    }
+    unknown = email_templates.unknown_placeholders(data.get("subject"), data.get("body"))
+    filled = email_templates.fill(data.get("subject"), data.get("body"), recipient, load_config().get("profile", {}))
+    return jsonify({**filled, "email": recipient["email"], "unknown": unknown})
+
+
+@bp.route("/templates/companies", methods=["POST"])
+def guess_companies():
+    """Company name guessed from each address's domain ("" for gmail.com and other personal mail)."""
+    emails = (request.json or {}).get("emails") or []
+    domains = sorted({str(e).split("@")[-1].lower().strip() for e in emails if "@" in str(e)})
+    return jsonify({"companies": {d: resolve_company_name(d) for d in domains[:5000]}})
 
 
 @bp.route("/campaign/sample-email", methods=["POST"])
@@ -273,14 +288,14 @@ def generate_campaign_emails(campaign_id):
     per-recipient regenerate endpoint to replace one.
     """
     config = load_config()
-    try:
-        key_cycle = get_groq_key_cycle(config)
-    except ValueError as e:
-        return json_error(str(e))
-
     campaign = query_db("SELECT * FROM campaigns WHERE id = ?", (campaign_id,), one=True)
     if not campaign:
         return json_error("Campaign not found", 404)
+    from_template = bool(campaign.get("template_subject"))
+    try:
+        key_cycle = None if from_template else get_groq_key_cycle(config)
+    except ValueError as e:
+        return json_error(str(e))
 
     def prepare():
         recipients = query_db(
@@ -301,6 +316,8 @@ def generate_campaign_emails(campaign_id):
         return json_error(err)
 
     def generate_one(r):
+        if from_template:
+            return _generate_for_recipient(config, campaign, r, None)
         time.sleep(random.uniform(0.1, 0.5))
         return _generate_for_recipient(config, campaign, r, get_next_groq_key(key_cycle))
 
@@ -332,12 +349,12 @@ def get_generation_progress(campaign_id):
 @bp.route("/campaign/<int:campaign_id>/recipient/<int:recipient_id>/regenerate", methods=["POST"])
 def regenerate_recipient_email(campaign_id, recipient_id):
     config = load_config()
+    campaign = query_db("SELECT * FROM campaigns WHERE id = ?", (campaign_id,), one=True)
     try:
-        keys = get_groq_keys(config)
+        keys = [None] if campaign and campaign.get("template_subject") else get_groq_keys(config)
     except ValueError as e:
         return json_error(str(e))
 
-    campaign = query_db("SELECT * FROM campaigns WHERE id = ?", (campaign_id,), one=True)
     recipient = query_db(
         "SELECT * FROM recipients WHERE id = ? AND campaign_id = ?",
         (recipient_id, campaign_id),

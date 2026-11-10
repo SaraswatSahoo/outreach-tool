@@ -198,3 +198,24 @@ def test_gmail_connection_test_endpoint(client, monkeypatch):
     )
     data = client.post("/api/settings/test-gmail").get_json()
     assert data["ok"] is False and "Can't reach Gmail" in data["summary"]
+
+
+def test_certificate_errors_are_explained():
+    import ssl
+
+    err = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    assert "security certificate" in E.describe_connection_error(err)
+
+
+def test_tls_context_works_without_system_certificates(monkeypatch, tmp_path):
+    """The packaged macOS app can't see the system store; certifi's bundle must be enough."""
+    import ssl
+
+    import tls
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "none.pem"))
+    monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
+    assert ssl.create_default_context().cert_store_stats()["x509_ca"] == 0  # the Mac app's situation
+    context = tls.ssl_context()
+    assert context.cert_store_stats()["x509_ca"] > 100
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname

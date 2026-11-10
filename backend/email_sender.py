@@ -18,6 +18,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
 
+from tls import ssl_context
+
 SMTP_HOST = "smtp.gmail.com"
 STARTTLS_PORT = 587  # plain connection upgraded with STARTTLS
 SSL_PORT = 465  # TLS from the start; often open on networks that block 587
@@ -63,7 +65,7 @@ class _IPv4SMTP_SSL(smtplib.SMTP_SSL, _IPv4Socket):  # SMTP_SSL wraps the IPv4 s
 
 def _open(port, ipv4_only, timeout=CONNECT_TIMEOUT):
     """An encrypted, not-yet-logged-in connection to Gmail. The hostname is kept for certificate checks."""
-    context = ssl.create_default_context()
+    context = ssl_context()
     if port == SSL_PORT:
         cls = _IPv4SMTP_SSL if ipv4_only else smtplib.SMTP_SSL
         return cls(SMTP_HOST, port, timeout=timeout, context=context)
@@ -88,6 +90,8 @@ def describe_connection_error(error):
         return "couldn't look up smtp.gmail.com (no internet?)"
     if "unreachable" in text or "10051" in text or "10065" in text:
         return "network unreachable"
+    if isinstance(error, ssl.SSLCertVerificationError) or "certificate verify failed" in text:
+        return "couldn't verify Gmail's security certificate (antivirus or proxy intercepting email?)"
     if isinstance(error, ssl.SSLError) or "certificate" in text:
         return "secure connection failed (antivirus or proxy intercepting email?)"
     return str(error) or error.__class__.__name__

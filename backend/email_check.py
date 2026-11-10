@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 
 from constants import BASE_DIR
+from tls import ssl_context
 
 VALID, RISKY, INVALID = "valid", "risky", "invalid"
 SERVICE_CACHE_DAYS = 30
@@ -310,7 +311,7 @@ def http_get_json(url, params, timeout=60):
     full = f"{url}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(full, headers={"Accept": "application/json", "User-Agent": "outreach-tool"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
+        with urllib.request.urlopen(request, timeout=timeout, context=ssl_context()) as resp:
             body = resp.read().decode("utf-8", "replace")
             status = resp.status
     except urllib.error.HTTPError as e:

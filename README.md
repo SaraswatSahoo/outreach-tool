@@ -54,7 +54,7 @@ Go to the [**Releases page**](https://github.com/SaraswatSahoo/outreach-tool/rel
 | System | File | How to start |
 |---|---|---|
 | Windows | `OutreachTool-windows.exe` | Double-click. If SmartScreen appears: **More info → Run anyway**. |
-| macOS | `OutreachTool-macos.zip` | Unzip, then **right-click → Open** the first time (the app isn't code-signed). |
+| macOS | `OutreachTool-macos.zip` | Unzip, then open **OutreachTool**. The app isn't signed, so macOS blocks it the first time: go to **System Settings → Privacy & Security**, click **Open Anyway**, then open it again. Built for Apple Silicon (M1 or later). |
 | Linux | `OutreachTool-linux.tar.gz` | `tar xzf OutreachTool-linux.tar.gz && ./OutreachTool` |
 
 Your browser opens the tool automatically. A small window shows that it's running — keep it open while you use the tool, and close it to stop.
@@ -108,6 +108,8 @@ Only addresses that pass the built-in checks are sent to the service, and each r
 ## 🩺 Troubleshooting
 
 **Emails show "NOT SENT (still a draft)" or "Couldn't reach Gmail's mail server"** — your computer couldn't connect to `smtp.gmail.com` at all, so nothing was sent and those emails are still drafts. The tool already retries each email several times and falls back from port 587 to 465; if Gmail still can't be reached 3 emails in a row, sending stops. Usual causes: college/office/public Wi-Fi blocking email ports, an antivirus "email/mail shield" (Avast, AVG, Kaspersky, McAfee, ESET, Bitdefender), a firewall, or a VPN. Use **Settings → Test Gmail connection** to check, or on Windows run `Test-NetConnection smtp.gmail.com -Port 587` in PowerShell. Fix the connection (or try another network, e.g. a phone hotspot), then send the campaign's drafts again. Emails marked **failed** by older versions can be put back with **Retry failed** on the campaign page.
+
+**Mac app: "secure connection failed" on both ports in Test Gmail connection** — versions up to 1.1.1 of the downloaded Mac app couldn't find the certificates needed to check Gmail's identity, so every send stayed a draft. Fixed in 1.2.0: download the new `OutreachTool-macos.zip`. Your data stays in `~/Library/Application Support/OutreachTool`.
 
 **"Gmail rejected the login"** — re-create the App Password (Google Account → Security → 2-Step Verification → App passwords) and save it in Settings.
 

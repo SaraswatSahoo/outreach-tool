@@ -7,6 +7,7 @@ from email.header import decode_header
 from constants import AUTO_UPDATABLE_STATUSES
 from llm import DEFAULT_TEXT_MODELS, json_chat, text_models
 from reply_detector import detect_replies
+from tls import ssl_context
 
 # How far back to look for bounces / auto-replies on each run
 LOOKBACK_DAYS = 30
@@ -14,7 +15,7 @@ LOOKBACK_DAYS = 30
 
 def get_imap_connection(gmail_address: str, app_password: str) -> imaplib.IMAP4_SSL:
     """Connect to Gmail via IMAP using App Password."""
-    mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+    mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, ssl_context=ssl_context())  # verifies Gmail's certificate
     mail.login(gmail_address, app_password)
     return mail
 
